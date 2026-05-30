@@ -2,16 +2,16 @@
 # =============================================================================
 # setup_and_train.sh — One-shot script for Gr00t finetuning
 # Works in both Docker and Apptainer (Euler cluster).
-# Handles: .env loading, directory setup, dataset verification, training.
+# Handles: .env loading, checkpoint download, data download, patching, training.
 #
 # Usage:
 #   ./setup_and_train.sh
 #
+#
 # Prerequisites:
-#   - .env must exist at the same directory (bind-mounted in Apptainer)
-#   - GROOT_HOME must point to a writable bind-mounted directory (/groot)
-#   - HF_TOKEN must be set (used by training script to download base model)
-#   - g1_dataset/ must be bind-mounted into the container
+#   - /hfm must be a writable directory (bind-mounted in Apptainer/Docker)
+#   - .env must exist (or .env.sample copied and edited)
+#   - HF_TOKEN must be set for downloading from HuggingFace
 # =============================================================================
 set -euo pipefail
 

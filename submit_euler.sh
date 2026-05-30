@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=groot-finetune
+#SBATCH --job-name=groot-finetune-red-green-no-recovery
 #SBATCH --output=logs/groot-%j.out
 #SBATCH --error=logs/groot-%j.err
 #SBATCH --time=4:00:00
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=12
+#SBATCH --cpus-per-task=24
 #SBATCH --mem-per-cpu=8G
-#SBATCH --gpus=rtx_4090:2
+#SBATCH --gpus=a100_80gb:2
 #SBATCH --tmp=200G
 # =============================================================================
 # submit_euler.sh — SLURM job script for groot finetuning on ETH Euler
@@ -62,7 +62,7 @@ PROJECT_DIR="$HOME/groot"
 CONTAINER_TAR="/cluster/work/mrl/$USER/containers/groot-environment.tar.gz"
 GROOT_DIR="/cluster/scratch/$USER/groot"
 RESULTS_DIR="/cluster/project/mrl/$USER/results/groot/$SLURM_JOB_ID"
-DATASET_HOST_DIR="/cluster/work/mrl/$USER/datasets/g1_dataset"
+DATASET_HOST_DIR="/cluster/work/mrl/$USER/datasets/g1_dataset_red_green"
 
 # --- Job info ---
 echo "=== groot Finetune Job ==="
