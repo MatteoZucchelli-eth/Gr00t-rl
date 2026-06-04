@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import datetime
 import json
 import logging
 import os
@@ -117,11 +118,22 @@ def run(config: Config):
     warn_configs(config)
 
     """Main training function."""
+    # Pre-generate dataset statistics on rank 0 before initializing distributed so
+    # the barrier() inside DatasetFactory doesn't timeout waiting for slow I/O.
+    if int(os.environ.get("RANK", "0")) == 0:
+        from gr00t.data.embodiment_tags import EmbodimentTag
+        from gr00t.data.stats import generate_rel_stats, generate_stats
+
+        for dataset_spec in config.data.datasets:
+            for dataset_path in dataset_spec.dataset_paths:
+                generate_stats(dataset_path)
+                generate_rel_stats(dataset_path, EmbodimentTag(dataset_spec.embodiment_tag))
+
     # If using distributed training, initialize the process group
     if dist.is_initialized():
         global_rank = dist.get_rank()
     elif "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
-        dist.init_process_group(backend="nccl")
+        dist.init_process_group(backend="nccl", timeout=datetime.timedelta(hours=2))
         # only meaningful for torchrun, for ray it is always 0
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)
@@ -182,6 +194,7 @@ def run(config: Config):
             name=experiment_name,
             config=config_dict,
             tags=[config.data.mode],
+            dir=str(output_dir),
         )
 
     # Setup model training pipeline.

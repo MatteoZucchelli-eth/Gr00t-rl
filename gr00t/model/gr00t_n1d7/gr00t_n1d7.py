@@ -597,6 +597,9 @@ class Gr00tN1d7(PreTrainedModel):
         backbone_outputs = self.backbone(backbone_inputs)
         action_outputs = self.action_head.get_action(backbone_outputs, action_inputs, options)
 
+        if "image_mask" in backbone_outputs:
+            action_outputs["image_mask"] = backbone_outputs["image_mask"]
+
         return action_outputs
 
     @property

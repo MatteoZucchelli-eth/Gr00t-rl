@@ -420,7 +420,18 @@ class Gr00tPolicy(BasePolicy):
         casted_action = {
             key: value.astype(np.float32) for key, value in unnormalized_action.items()
         }
-        return casted_action, {}
+
+        # Extract mean-pooled visual embeddings from image token positions
+        info = {}
+        if "backbone_features" in model_pred and "image_mask" in model_pred:
+            backbone_features = model_pred["backbone_features"]  # [B, seq_len, hidden_size]
+            image_mask = model_pred["image_mask"]  # [B, seq_len]
+            visual_embeds = torch.stack(
+                [backbone_features[i][image_mask[i]].mean(0) for i in range(backbone_features.shape[0])]
+            )  # [B, hidden_size]
+            info["visual_embeds"] = visual_embeds.float().cpu().numpy()
+
+        return casted_action, info
 
     def check_action(self, action: dict[str, Any]) -> None:
         """Validate that the action has the correct structure and types.

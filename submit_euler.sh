@@ -86,6 +86,15 @@ mkdir -p "$RESULTS_DIR"
 echo "[euler] Extracting container to \$TMPDIR..."
 time tar -xzf "$CONTAINER_TAR" -C "$TMPDIR"
 
+# --- Copy dataset to local scratch (avoids slow NFS reads during stats generation) ---
+# generate_stats/generate_rel_stats scans all parquet files on rank 0 before the NCCL
+# barrier — on Lustre this takes ~4.5 s/file (~10 min for 131 files), exceeding the
+# 600 s barrier timeout.  Reading from local NVMe reduces this to <10 s total.
+DATASET_LOCAL_DIR="$TMPDIR/g1_dataset"
+echo "[euler] Rsyncing dataset to local scratch (${DATASET_LOCAL_DIR})..."
+time rsync -a --info=progress2 "$DATASET_HOST_DIR/" "$DATASET_LOCAL_DIR/"
+echo "[euler] Dataset copy done."
+
 # --- Launch with Apptainer ---
 # --nv:                 enable NVIDIA GPU support
 # --bind /groot:        scratch storage for checkpoints, data, caches (read-write)
@@ -101,7 +110,7 @@ time apptainer exec --nv \
     --bind "$PROJECT_DIR/setup_and_train.sh:/workspace/setup_and_train.sh" \
     --bind "$PROJECT_DIR/start_finetune.sh:/workspace/start_finetune.sh" \
     --bind "$PROJECT_DIR/register_new_modality.py:/workspace/register_new_modality.py" \
-    --bind "$DATASET_HOST_DIR:/workspace/g1_dataset" \
+    --bind "$DATASET_LOCAL_DIR:/workspace/g1_dataset" \
     --env TRITON_CACHE_DIR=/groot/cache/triton \
     --env TORCH_EXTENSIONS_DIR=/groot/cache/torch_kernels \
     --env XDG_CACHE_HOME=/groot/cache \
