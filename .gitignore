@@ -169,6 +169,6 @@ offline_open_loop_eval_plots/
 /models
 /data
 
-g1_dataset
+g1_dataset*
 .env
-checkpoints
+checkpoints*

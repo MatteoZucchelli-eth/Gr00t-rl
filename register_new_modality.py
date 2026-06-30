@@ -15,8 +15,17 @@ The recorded dataset has:
   state  (35-dim): left_palm_eef_9d(9) + right_palm_eef_9d(9)
                    + left_arm(7) + right_arm(7) + waist(3)
   action (18-dim): left_palm_eef_9d(9) + right_palm_eef_9d(9)
-  video:           observation.images.ego_view  →  "ego_view" key
+  video:           observation.images.ego_view    →  "ego_view" key
+                   observation.images.wrist_view  →  "wrist_view" key
   language:        annotation.human.action.task_description
+
+Auxiliary per-frame columns (in the parquet, NOT GR00T modalities):
+  next.progress:   task progress in [0, 1] = frame_index / completion_frame,
+                   clamped to 1 from the right-B "task complete" mark onward.
+                   GR00T's loader only consumes video/state/action/language/mask
+                   (ALLOWED_MODALITIES), so progress is not registered as a
+                   modality below; read it straight from the parquet for a
+                   progress/value head, reward shaping, or episode filtering.
 
 After fine-tuning, deploy with chunk_size=G1_PALM_EEF_CHUNK_SIZE (see below).
 """
@@ -36,10 +45,11 @@ from gr00t.data.types import (
 G1_PALM_EEF_CHUNK_SIZE: int = 30
 
 mrl_unitree_g1 = {
-    # Video: single ego-view camera, current frame only.
+    # Video: head (ego_view) + wrist (wrist_view) cameras, each providing the
+    # previous and current frame (delta_indices=[-1, 0]).
     "video": ModalityConfig(
         delta_indices=[-1, 0],
-        modality_keys=["ego_view"],
+        modality_keys=["ego_view", "wrist_view"],
     ),
     # State: current PALM EEF poses (FK from Pinocchio) + arm + waist joints.
     "state": ModalityConfig(
@@ -84,4 +94,3 @@ mrl_unitree_g1 = {
 
 # Always register custom embodiments under NEW_EMBODIMENT.
 register_modality_config(mrl_unitree_g1, embodiment_tag=EmbodimentTag.NEW_EMBODIMENT)
-
