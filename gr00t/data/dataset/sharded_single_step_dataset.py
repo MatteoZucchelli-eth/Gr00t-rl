@@ -69,6 +69,14 @@ def extract_step_data(
     assert len(language_data) == 1, f"Expected 1 language, got {len(language_data)}"
     text = language_data[list(language_data.keys())[0]][0]
 
+    # Surface the auxiliary progress target (current step) via metadata so it can
+    # reach the progress head without being treated as a GR00T modality.
+    metadata: dict = {}
+    if "progress" in episode_data.columns:
+        metadata["progress"] = np.asarray(
+            [episode_data["progress"].iloc[step_index]], dtype=np.float32
+        )
+
     vla_step_data = VLAStepData(
         images=video_data,
         masks=mask_data if mask_data else None,
@@ -76,6 +84,7 @@ def extract_step_data(
         actions=action_data,
         text=text,
         embodiment=embodiment_tag,
+        metadata=metadata,
     )
     return vla_step_data
 

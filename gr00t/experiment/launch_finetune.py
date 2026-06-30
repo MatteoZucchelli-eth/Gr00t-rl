@@ -91,6 +91,11 @@ if __name__ == "__main__":
     config.model.backbone_trainable_params_fp32 = True
     config.model.use_relative_action = True
 
+    # Optional progress / time-to-completion head.
+    config.model.use_progress_head = ft_config.use_progress_head
+    config.model.progress_loss_weight = ft_config.progress_loss_weight
+    config.model.use_progress_conditioning = ft_config.use_progress_conditioning
+
     config.training.experiment_name = ft_config.experiment_name
     config.training.start_from_checkpoint = ft_config.base_model_path
     config.training.optim = "adamw_torch"

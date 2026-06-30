@@ -393,6 +393,12 @@ class LeRobotEpisodeLoader:
             for joint_group in joint_groups_df.columns:
                 loaded_df[f"{modality_type}.{joint_group}"] = joint_groups_df[joint_group]
 
+        # Auxiliary per-frame task-progress target (in [0, 1]) for the optional
+        # progress head. Not a GR00T modality -- carried through as a plain column
+        # and surfaced via VLAStepData.metadata in extract_step_data().
+        if "next.progress" in original_df.columns:
+            loaded_df["progress"] = original_df["next.progress"].astype("float32")
+
         return loaded_df
 
     def _load_video_data(self, episode_index: int, indices: np.ndarray) -> dict[str, np.ndarray]:

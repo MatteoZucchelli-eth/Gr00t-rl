@@ -57,6 +57,19 @@ class FinetuneConfig:
     tune_diffusion_model: bool = True
     """If True, fine-tune the diffusion-based action decoder (if present in the model)."""
 
+    use_progress_head: bool = False
+    """If True, add an auxiliary head that predicts per-step task progress in [0, 1] from the
+    VLM latent (target = the `next.progress` column in the parquet). Useful as a coarse->fine
+    handoff trigger and to make the action head phase-aware near task completion."""
+
+    progress_loss_weight: float = 0.5
+    """Weight on the progress BCE loss when added to the action loss (only used if use_progress_head)."""
+
+    use_progress_conditioning: bool = True
+    """If True, feed progress back as a conditioning token to the action head so it can switch into
+    a finer-motion regime as the task approaches completion. Teacher-forced: training conditions on
+    the ground-truth progress (+ small noise), inference on the head's predicted progress."""
+
     state_dropout_prob: float = 0.2
     """
     Dropout probability applied to state inputs for regularization during training.

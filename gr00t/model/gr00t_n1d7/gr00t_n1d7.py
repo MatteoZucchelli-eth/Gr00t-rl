@@ -35,6 +35,58 @@ from gr00t.model.modules.embodiment_conditioned_mlp import (
 logger = logging.getLogger(__name__)
 
 
+class ProgressHead(nn.Module):
+    """Auxiliary head predicting per-step task progress in [0, 1].
+
+    The head mean-pools the (post-vlln) VLM latent over valid tokens and
+    regresses task progress as a raw logit (apply sigmoid for the value). When
+    conditioning is enabled it also embeds the estimate back into a single token
+    that is appended to the state tokens, letting the action DiT switch regimes
+    (e.g. coarse approach vs. fine alignment) based on its own progress estimate
+    -- no ground-truth progress is required at inference time.
+    """
+
+    def __init__(
+        self,
+        latent_dim: int,
+        hidden_dim: int,
+        cond_dim: int,
+        use_conditioning: bool,
+    ):
+        super().__init__()
+        self.predictor = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        if use_conditioning:
+            self.cond_embed = nn.Sequential(
+                nn.Linear(1, cond_dim),
+                nn.GELU(),
+                nn.Linear(cond_dim, cond_dim),
+            )
+        else:
+            self.cond_embed = None
+
+    def predict_logit(
+        self, vl_embeds: torch.Tensor, attention_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Mean-pool valid VLM tokens and return the progress logit, shape (B, 1)."""
+        if attention_mask is not None:
+            mask = attention_mask[..., None].to(vl_embeds.dtype)
+            pooled = (vl_embeds * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1e-6)
+        else:
+            pooled = vl_embeds.mean(dim=1)
+        return self.predictor(pooled)
+
+    def conditioning_token(self, progress_value: torch.Tensor) -> torch.Tensor:
+        """Embed a progress value in [0, 1] -> a single conditioning token (B, 1, cond_dim)."""
+        assert self.cond_embed is not None
+        return self.cond_embed(progress_value).unsqueeze(1)
+
+
 class Gr00tN1d7ActionHead(nn.Module):
     """Action head component for flow matching diffusion policy."""
 
@@ -97,6 +149,19 @@ class Gr00tN1d7ActionHead(nn.Module):
 
         # State dropout parameters
         self.state_dropout_prob = config.state_dropout_prob
+
+        # Optional progress / time-to-completion head (see ProgressHead).
+        self.use_progress_head = getattr(config, "use_progress_head", False)
+        if self.use_progress_head:
+            self.progress_loss_weight = config.progress_loss_weight
+            self.use_progress_conditioning = config.use_progress_conditioning
+            self.progress_conditioning_noise_std = config.progress_conditioning_noise_std
+            self.progress_head = ProgressHead(
+                latent_dim=config.backbone_embedding_dim,
+                hidden_dim=config.progress_hidden_dim,
+                cond_dim=self.input_embedding_dim,
+                use_conditioning=config.use_progress_conditioning,
+            )
 
         self.beta_dist = Beta(config.noise_beta_alpha, config.noise_beta_beta)
         self.num_timestep_buckets = config.num_timestep_buckets
@@ -165,6 +230,12 @@ class Gr00tN1d7ActionHead(nn.Module):
         backbone_output["backbone_features"] = backbone_features
         return backbone_output
 
+    def _progress_cond_token(self, progress_value: torch.Tensor) -> torch.Tensor | None:
+        """Build the progress conditioning token from a progress value in [0, 1], shape (B, 1)."""
+        if not self.use_progress_conditioning:
+            return None
+        return self.progress_head.conditioning_token(progress_value)
+
     def forward(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
         """
         Forward pass through the action head.
@@ -230,9 +301,34 @@ class Gr00tN1d7ActionHead(nn.Module):
             pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
             action_features = action_features + pos_embs
 
+        vl_attn_mask = backbone_output.backbone_attention_mask
+
+        # Optional progress head: predict task progress from the VLM latent (for
+        # the auxiliary loss) and condition the action tokens on progress.
+        # Teacher forcing: condition on the ground-truth progress (+ small noise)
+        # so the action head cleanly learns the progress -> action-magnitude
+        # relationship; the predicted progress is used for conditioning only at
+        # inference time. Falls back to the (detached) prediction if no target.
+        progress_logit = None
+        progress_target = action_input.get("progress", None)
+        if self.use_progress_head:
+            progress_logit = self.progress_head.predict_logit(vl_embeds, vl_attn_mask)
+            if progress_target is not None:
+                cond_value = progress_target.to(vl_embeds.dtype).view(-1, 1)
+                if self.training and self.progress_conditioning_noise_std > 0:
+                    cond_value = (
+                        cond_value
+                        + self.progress_conditioning_noise_std * torch.randn_like(cond_value)
+                    )
+                    cond_value = cond_value.clamp(0.0, 1.0)
+            else:
+                cond_value = torch.sigmoid(progress_logit).detach()
+            cond_token = self._progress_cond_token(cond_value)
+            if cond_token is not None:
+                state_features = torch.cat((state_features, cond_token), dim=1)
+
         # Join vision, language, state and action embedding along sequence dimension.
         sa_embs = torch.cat((state_features, action_features), dim=1)
-        vl_attn_mask = backbone_output.backbone_attention_mask
 
         if self.config.use_alternate_vl_dit:
             image_mask = backbone_output.image_mask
@@ -263,13 +359,29 @@ class Gr00tN1d7ActionHead(nn.Module):
         action_loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
         loss = action_loss.sum() / (action_mask.sum() + 1e-6)
 
-        return {
+        outputs = {
             "loss": loss,
             "action_loss": action_loss,
+            # Scalar masked-mean action loss (== total loss before the progress
+            # term is added), logged separately so the wandb lines reconcile:
+            # loss == action_loss_scalar + progress_loss_weight * progress_loss.
+            "action_loss_scalar": loss.detach(),
             "action_mask": action_mask,
             "backbone_features": vl_embeds,
             "state_features": state_features,
         }
+
+        # Progress head: regress task progress with a BCE-with-logits loss on the
+        # soft [0, 1] target, and fold it into the total loss.
+        if self.use_progress_head and progress_logit is not None:
+            outputs["progress_pred"] = torch.sigmoid(progress_logit)
+            if progress_target is not None:
+                progress_target = progress_target.to(progress_logit.dtype).view(-1, 1)
+                progress_loss = F.binary_cross_entropy_with_logits(progress_logit, progress_target)
+                outputs["progress_loss"] = progress_loss
+                outputs["loss"] = loss + self.progress_loss_weight * progress_loss
+
+        return outputs
 
     def _encode_features(
         self, backbone_output: BatchFeature, action_input: BatchFeature
@@ -379,6 +491,19 @@ class Gr00tN1d7ActionHead(nn.Module):
                 :,
             ] = ramp[None, :, None].to(device)
 
+        # Progress head: predict task progress once (independent of the action
+        # noise) and pre-build the conditioned state tokens reused every step.
+        progress_pred = None
+        sa_state_features = state_features
+        if self.use_progress_head:
+            attn_mask = backbone_output.get("backbone_attention_mask", None)
+            progress_logit = self.progress_head.predict_logit(vl_embeds, attn_mask)
+            progress_pred = torch.sigmoid(progress_logit)
+            # At inference we condition on the model's own predicted progress.
+            cond_token = self._progress_cond_token(progress_pred)
+            if cond_token is not None:
+                sa_state_features = torch.cat((state_features, cond_token), dim=1)
+
         # Run denoising steps.
         for t in range(self.num_inference_timesteps):
             t_cont = t / float(self.num_inference_timesteps)  # e.g. goes 0, 1/N, 2/N, ...
@@ -396,7 +521,7 @@ class Gr00tN1d7ActionHead(nn.Module):
                 action_features = action_features + pos_embs
 
             # Join vision, language, state and action embedding along sequence dimension.
-            sa_embs = torch.cat((state_features, action_features), dim=1)
+            sa_embs = torch.cat((sa_state_features, action_features), dim=1)
 
             # Run model forward.
             if self.config.use_alternate_vl_dit:
@@ -420,13 +545,14 @@ class Gr00tN1d7ActionHead(nn.Module):
             # Update actions using euler integration.
             actions = actions + dt * pred_velocity * vel_strength
 
-        return BatchFeature(
-            data={
-                "action_pred": actions,
-                "backbone_features": vl_embeds,
-                "state_features": state_features,
-            }
-        )
+        result = {
+            "action_pred": actions,
+            "backbone_features": vl_embeds,
+            "state_features": state_features,
+        }
+        if progress_pred is not None:
+            result["progress_pred"] = progress_pred
+        return BatchFeature(data=result)
 
     @torch.no_grad()
     def get_action(
@@ -595,8 +721,18 @@ class Gr00tN1d7(PreTrainedModel):
 
         # Forward through backbone
         backbone_outputs = self.backbone(backbone_inputs)
+
+        # Capture the raw VLM latent (last hidden state, full token sequence) before the
+        # action head's process_backbone_output reassigns the "backbone_features" key
+        # with the post-vlln / self-attention version.
+        raw_backbone_features = backbone_outputs["backbone_features"]
+
         action_outputs = self.action_head.get_action(backbone_outputs, action_inputs, options)
 
+        # Surface the raw backbone features plus masks for downstream embedding extraction.
+        action_outputs["backbone_features"] = raw_backbone_features
+        if "backbone_attention_mask" in backbone_outputs:
+            action_outputs["backbone_attention_mask"] = backbone_outputs["backbone_attention_mask"]
         if "image_mask" in backbone_outputs:
             action_outputs["image_mask"] = backbone_outputs["image_mask"]
 

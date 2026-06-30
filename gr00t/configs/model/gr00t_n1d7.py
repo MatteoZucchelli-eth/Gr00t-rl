@@ -121,6 +121,23 @@ class Gr00tN1d7Config(PretrainedConfig):
     # Multi-embodiment parameters
     max_num_embodiments: int = 32
 
+    # Progress / time-to-completion head parameters.
+    # When enabled, an auxiliary head pools the VLM latent and regresses the
+    # per-step task progress in [0, 1] (the `next.progress` column in the
+    # parquet), supervised with a BCE-with-logits loss. When
+    # `use_progress_conditioning` is on, the progress value is fed back as an
+    # extra conditioning token so the action head can switch into a finer-motion
+    # regime as the task approaches completion. The conditioning is taught by
+    # teacher forcing: training conditions on the *ground-truth* progress (plus a
+    # little noise for robustness), inference conditions on the *predicted*
+    # progress from the head. All default off so existing embodiments /
+    # checkpoints are unaffected; enable via the finetune config / CLI.
+    use_progress_head: bool = False
+    progress_loss_weight: float = 0.5
+    use_progress_conditioning: bool = True
+    progress_conditioning_noise_std: float = 0.05
+    progress_hidden_dim: int = 512
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         for key, value in kwargs.items():

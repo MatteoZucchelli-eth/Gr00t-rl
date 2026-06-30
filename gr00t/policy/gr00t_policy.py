@@ -421,15 +421,28 @@ class Gr00tPolicy(BasePolicy):
             key: value.astype(np.float32) for key, value in unnormalized_action.items()
         }
 
-        # Extract mean-pooled visual embeddings from image token positions
+        # Surface the raw VLM backbone features (last hidden state, full token sequence)
+        # so callers can pool/probe them however they need.
         info = {}
-        if "backbone_features" in model_pred and "image_mask" in model_pred:
-            backbone_features = model_pred["backbone_features"]  # [B, seq_len, hidden_size]
-            image_mask = model_pred["image_mask"]  # [B, seq_len]
-            visual_embeds = torch.stack(
-                [backbone_features[i][image_mask[i]].mean(0) for i in range(backbone_features.shape[0])]
-            )  # [B, hidden_size]
-            info["visual_embeds"] = visual_embeds.float().cpu().numpy()
+        if "backbone_features" in model_pred:
+            info["backbone_features"] = (
+                model_pred["backbone_features"].float().cpu().numpy()
+            )  # [B, seq_len, hidden_size]
+            if "backbone_attention_mask" in model_pred:
+                info["backbone_attention_mask"] = (
+                    model_pred["backbone_attention_mask"].cpu().numpy()
+                )  # [B, seq_len] bool: valid (non-padding) tokens
+            if "image_mask" in model_pred:
+                info["image_mask"] = (
+                    model_pred["image_mask"].cpu().numpy()
+                )  # [B, seq_len] bool: image-token positions
+
+        # Surface the predicted task progress (progress head) so callers can use it
+        # as a coarse->fine handoff / transition trigger.
+        if "progress_pred" in model_pred:
+            info["progress_pred"] = (
+                model_pred["progress_pred"].float().cpu().numpy()
+            )  # [B, 1] in [0, 1]
 
         return casted_action, info
 
