@@ -172,3 +172,8 @@ offline_open_loop_eval_plots/
 g1_dataset*
 .env
 checkpoints*
+
+# Container build artifacts (large; build locally, never commit)
+groot-environment.tar.gz
+*.sif
+*.tar.gz
