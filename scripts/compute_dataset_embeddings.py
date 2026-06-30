@@ -180,16 +180,19 @@ def main() -> None:
                 )
                 continue
 
-            visual_embed = info.get("visual_embeds")
-            if visual_embed is None:
+            backbone_features = info.get("backbone_features")  # (1, seq_len, hidden_size)
+            image_mask = info.get("image_mask")  # (1, seq_len) bool
+            if backbone_features is None or image_mask is None:
                 print(
-                    "ERROR: server returned no 'visual_embeds' in info. "
+                    "ERROR: server returned no 'backbone_features'/'image_mask' in info. "
                     "Make sure the patched Gr00tPolicy is running.",
                     file=sys.stderr,
                 )
                 sys.exit(1)
 
-            all_embeddings.append(visual_embed[0].astype(np.float32))  # (hidden_size,)
+            # Mean-pool the raw VLM latent over image-token positions -> (hidden_size,).
+            feat = backbone_features[0][image_mask[0]].mean(axis=0)
+            all_embeddings.append(feat.astype(np.float32))  # (hidden_size,)
             all_meta.append((ep_idx, frame_idx))
             total_processed += 1
 
