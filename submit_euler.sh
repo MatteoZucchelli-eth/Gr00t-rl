@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=groot-finetune-red-green-no-recovery
+#SBATCH --job-name=groot-small-red-predict
 #SBATCH --output=logs/groot-%j.out
 #SBATCH --error=logs/groot-%j.err
-#SBATCH --time=4:00:00
+#SBATCH --time=24:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=24
 #SBATCH --mem-per-cpu=8G
@@ -26,28 +26,38 @@
 #
 #   3. Transfer to Euler:
 #        # Send the heavy container image to the work directory
-#        rsync -avP groot-environment.tar.gz \
-#            euler:/cluster/work/mrl/mzucchelli/containers/
+#    rsync -avP groot-environment.tar.gz \
+#        euler:/cluster/work/mrl/$USER/containers/
 #
-#        # Sync the codebase to the home directory, excluding heavy/local folders
+#        # Sync the codebase to the home directory, excluding heavy/local folders.
+#        # $HOME on Euler is quota-limited (~45 GB / 450k files), so keep datasets,
+#        # checkpoints, and vendored deps out of it.
 #        rsync -avP \
 #            --exclude='.git' \
 #            --exclude='__pycache__' \
 #            --exclude='*.egg-info' \
 #            --exclude='.venv' \
 #            --exclude='venv' \
-#            --exclude='g1_dataset' \
-#            --exclude='groot-environment.tar.gz' \
+#            --exclude='checkpoints*' \
+#            --exclude='g1_dataset*' \
+#            --exclude='external_dependencies' \
+#            --exclude='media' \
+#            --exclude='demo_data' \
+#            --exclude='wandb' \
+#            --exclude='*.gz' \
 #            . euler:~/groot/
 #
-#        # Sync the dataset directly to the high-capacity work directory
-#        rsync -avP g1_dataset/ euler:/cluster/work/mrl/mzucchelli/datasets/g1_dataset/
+#        # Sync the dataset directly to the high-capacity work directory.
+#        # The trailing target name must match DATASET_HOST_DIR below (g1_dataset).
+#        rsync -avP g1_dataset/ euler:/cluster/work/mrl/$USER/datasets/g1_dataset/
 #
 #   4. One-time setup on Euler (run once after first transfer):
 #        mkdir -p /cluster/work/mrl/$USER/containers
 #        mkdir -p /cluster/project/mrl/$USER/results/groot
 #        mkdir -p /cluster/scratch/$USER/groot/{cache/checkpoints,data,runs}
 #        mkdir -p ~/groot/logs
+#        # REQUIRED: the apptainer run below binds ~/groot/.env and will fail if
+#        # the file is missing. Create it and fill in your tokens.
 #        cp ~/groot/.env.sample ~/groot/.env  # then edit with your tokens
 # =============================================================================
 
@@ -62,7 +72,7 @@ PROJECT_DIR="$HOME/groot"
 CONTAINER_TAR="/cluster/work/mrl/$USER/containers/groot-environment.tar.gz"
 GROOT_DIR="/cluster/scratch/$USER/groot"
 RESULTS_DIR="/cluster/project/mrl/$USER/results/groot/$SLURM_JOB_ID"
-DATASET_HOST_DIR="/cluster/work/mrl/$USER/datasets/g1_dataset_red_green"
+DATASET_HOST_DIR="/cluster/work/mrl/$USER/datasets/g1_dataset_small_finecontroller"
 
 # --- Job info ---
 echo "=== groot Finetune Job ==="
@@ -107,6 +117,7 @@ time apptainer exec --nv \
     --bind "$PROJECT_DIR/.env:/workspace/.env" \
     --bind "$RESULTS_DIR:/results" \
     --bind "$PROJECT_DIR/scripts:/workspace/scripts" \
+    --bind "$PROJECT_DIR/gr00t:/workspace/gr00t" \
     --bind "$PROJECT_DIR/setup_and_train.sh:/workspace/setup_and_train.sh" \
     --bind "$PROJECT_DIR/start_finetune.sh:/workspace/start_finetune.sh" \
     --bind "$PROJECT_DIR/register_new_modality.py:/workspace/register_new_modality.py" \

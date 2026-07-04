@@ -75,6 +75,18 @@ class FinetuneConfig:
     Dropout probability applied to state inputs for regularization during training.
     """
 
+    # --- Image Resolution ---
+    image_target_size: int = 256
+    """Square edge length (px) the image is resized to before it is fed to the VLM
+    (model config `image_target_size`). Larger = more detail preserved for small
+    targets, at the cost of more visual tokens / GPU memory. The Cosmos-Reason2 (Qwen3-VL)
+    backbone uses native dynamic resolution, so raising this is safe. Must be > image_crop_size."""
+
+    image_crop_size: int = 230
+    """Square edge length (px) of the crop taken during the resize pipeline (model config
+    `image_crop_size`). Kept slightly below image_target_size (default ratio ~0.9) to allow
+    the random/center crop augmentation. Set together with image_target_size."""
+
     # --- Data Augmentation ---
     random_rotation_angle: int | None = None
     """Maximum rotation angle (in degrees) for random rotation augmentation of input images."""

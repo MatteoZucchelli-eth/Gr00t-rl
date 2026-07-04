@@ -91,6 +91,16 @@ if __name__ == "__main__":
     config.model.backbone_trainable_params_fp32 = True
     config.model.use_relative_action = True
 
+    # Image resolution fed to the VLM. Set the (target, crop) pair together and leave
+    # shortest_image_edge / crop_fraction as None (experiment.py validates this).
+    assert (
+        ft_config.image_crop_size < ft_config.image_target_size
+    ), "image_crop_size must be smaller than image_target_size"
+    config.model.image_target_size = (ft_config.image_target_size, ft_config.image_target_size)
+    config.model.image_crop_size = (ft_config.image_crop_size, ft_config.image_crop_size)
+    config.model.shortest_image_edge = None
+    config.model.crop_fraction = None
+
     # Optional progress / time-to-completion head.
     config.model.use_progress_head = ft_config.use_progress_head
     config.model.progress_loss_weight = ft_config.progress_loss_weight
