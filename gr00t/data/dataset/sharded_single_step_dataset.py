@@ -41,6 +41,12 @@ def extract_step_data(
         indices_to_load = [step_index + delta_index for delta_index in config.delta_indices]
         if allow_padding:
             indices_to_load = [max(0, min(idx, len(episode_data) - 1)) for idx in indices_to_load]
+        else:
+            # Negative delta indices (history, e.g. video delta_indices=[-1, 0]) near the
+            # episode start are padded by repeating the first frame. Without this clamp,
+            # a negative index would silently wrap around via .iloc and fetch frames from
+            # the END of the episode.
+            indices_to_load = [max(0, idx) for idx in indices_to_load]
         for key in config.modality_keys:
             if f"{modality}.{key}" in episode_data.columns:
                 modality_data = episode_data[f"{modality}.{key}"].iloc[indices_to_load]
@@ -75,6 +81,11 @@ def extract_step_data(
     if "progress" in episode_data.columns:
         metadata["progress"] = np.asarray(
             [episode_data["progress"].iloc[step_index]], dtype=np.float32
+        )
+    # Tip-target label (current step) for the optional tip-target head.
+    if "tip_target_9d" in episode_data.columns:
+        metadata["tip_target_9d"] = np.asarray(
+            episode_data["tip_target_9d"].iloc[step_index], dtype=np.float32
         )
 
     vla_step_data = VLAStepData(

@@ -399,6 +399,14 @@ class LeRobotEpisodeLoader:
         if "next.progress" in original_df.columns:
             loaded_df["progress"] = original_df["next.progress"].astype("float32")
 
+        # Auxiliary per-frame tip-target label (xyz(3) + rot6d(6), tip frame) for
+        # the optional tip-target head; same pass-through mechanism as progress.
+        # Unresolved frames are NaN and are masked out of the loss by the head.
+        if "next.tip_target_9d" in original_df.columns:
+            loaded_df["tip_target_9d"] = original_df["next.tip_target_9d"].map(
+                lambda x: np.asarray(x, dtype=np.float32)
+            )
+
         return loaded_df
 
     def _load_video_data(self, episode_index: int, indices: np.ndarray) -> dict[str, np.ndarray]:

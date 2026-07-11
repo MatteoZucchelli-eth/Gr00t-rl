@@ -106,6 +106,12 @@ if __name__ == "__main__":
     config.model.progress_loss_weight = ft_config.progress_loss_weight
     config.model.use_progress_conditioning = ft_config.use_progress_conditioning
 
+    # Optional tip-target head.
+    config.model.use_tip_target_head = ft_config.use_tip_target_head
+    config.model.tip_target_loss_weight = ft_config.tip_target_loss_weight
+    config.model.use_tip_target_conditioning = ft_config.use_tip_target_conditioning
+    config.model.tip_target_xyz_scale = ft_config.tip_target_xyz_scale
+
     config.training.experiment_name = ft_config.experiment_name
     config.training.start_from_checkpoint = ft_config.base_model_path
     config.training.optim = "adamw_torch"

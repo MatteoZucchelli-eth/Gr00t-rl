@@ -34,6 +34,32 @@ from gr00t.data.types import MessageType, ModalityConfig, VLAStepData
 from .policy import BasePolicy, PolicyWrapper
 
 
+def _center_crop_to_square(image: np.ndarray) -> np.ndarray:
+    """Center-crop a batched image array to a square along its larger spatial dimension.
+
+    The fine-tuning dataset was preprocessed to remove letterbox black bars: the
+    incoming 16:9 (wider-than-tall) camera frames are cropped to their centered
+    H×H square before being fed to the model, so the model never sees the padded
+    bars that ``LetterBoxTransform``/``LetterBoxPad`` would otherwise add. This
+    replicates that exact crop at inference time so the server input matches the
+    training distribution.
+
+    Args:
+        image: uint8 array of shape (B, T, H, W, C).
+
+    Returns:
+        uint8 array of shape (B, T, S, S, C) where S = min(H, W), taking the
+        centered square. Already-square inputs are returned unchanged.
+    """
+    h, w = image.shape[2], image.shape[3]
+    if h == w:
+        return image
+    side = min(h, w)
+    top = (h - side) // 2
+    left = (w - side) // 2
+    return image[:, :, top : top + side, left : left + side, :]
+
+
 def _rec_to_dtype(x: Any, dtype: torch.dtype) -> Any:
     """Recursively convert all floating point tensors in a nested structure to the given dtype.
 
@@ -387,6 +413,14 @@ class Gr00tPolicy(BasePolicy):
         Returns:
             Tuple of (actions_dict, info_dict)
         """
+        # Step 0: Center-crop every camera view to a square, matching the
+        # letterbox-removal crop applied to the fine-tuning dataset. Without this
+        # the model would receive black-padded 16:9 frames it never saw in training.
+        # observation = {
+        #     **observation,
+        #     "video": {k: _center_crop_to_square(v) for k, v in observation["video"].items()},
+        # }
+
         # Step 1: Split batched observation into individual observations
         unbatched_observations = self._unbatch_observation(observation)
         processed_inputs = []
@@ -443,6 +477,14 @@ class Gr00tPolicy(BasePolicy):
             info["progress_pred"] = (
                 model_pred["progress_pred"].float().cpu().numpy()
             )  # [B, 1] in [0, 1]
+
+        # Surface the predicted tip-frame target pose (tip-target head):
+        # xyz(3, metres) + orthonormalized rot6d(6). ||xyz|| is the predicted
+        # distance to target.
+        if "tip_target_pred" in model_pred:
+            info["tip_target_pred"] = (
+                model_pred["tip_target_pred"].float().cpu().numpy()
+            )  # [B, 9]
 
         return casted_action, info
 

@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=24
 #SBATCH --mem-per-cpu=8G
-#SBATCH --gpus=a100_80gb:2
+#SBATCH --gpus=2
 #SBATCH --tmp=200G
 # =============================================================================
 # submit_euler.sh — SLURM job script for groot finetuning on ETH Euler
@@ -125,6 +125,7 @@ time apptainer exec --nv \
     --env TRITON_CACHE_DIR=/groot/cache/triton \
     --env TORCH_EXTENSIONS_DIR=/groot/cache/torch_kernels \
     --env XDG_CACHE_HOME=/groot/cache \
+    --env RUN_NAME="${RUN_NAME:-red_and_green}" \
     "$TMPDIR/groot-environment.sif" \
     bash /workspace/setup_and_train.sh
 

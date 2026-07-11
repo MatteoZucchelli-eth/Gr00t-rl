@@ -92,6 +92,10 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 use_progress_head=self.config.model.use_progress_head,
                 progress_loss_weight=self.config.model.progress_loss_weight,
                 use_progress_conditioning=self.config.model.use_progress_conditioning,
+                use_tip_target_head=self.config.model.use_tip_target_head,
+                tip_target_loss_weight=self.config.model.tip_target_loss_weight,
+                use_tip_target_conditioning=self.config.model.use_tip_target_conditioning,
+                tip_target_xyz_scale=self.config.model.tip_target_xyz_scale,
                 transformers_loading_kwargs=self.transformers_loading_kwargs,
                 output_loading_info=True,
                 **self.transformers_loading_kwargs,
@@ -106,18 +110,36 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                     )
                 logging.info("mask_token not in checkpoint - initialized")
 
-            # The optional progress head is newly added on top of a base
-            # checkpoint that has no such weights, so its parameters are expected
-            # to be missing and are left at their fresh initialization.
+            # The optional progress and tip-target heads are newly added on top
+            # of a base checkpoint that has no such weights, so their parameters
+            # are expected to be missing and are left at their fresh initialization.
             if self.config.model.use_progress_head and any(
                 "progress_head" in key for key in missing_keys
             ):
                 logging.info("progress_head not in checkpoint - initialized")
+            if self.config.model.use_tip_target_head and any(
+                "tip_target_head" in key for key in missing_keys
+            ):
+                logging.info("tip_target_head not in checkpoint - initialized")
 
             unexpected_keys = loading_info.get("unexpected_keys", [])
+            # Mirror the missing-keys tolerance above: a checkpoint trained WITH
+            # an auxiliary head (or its conditioning embed) can be loaded with
+            # that option disabled — the now-unused head weights are dropped
+            # instead of hard-failing.
+            dropped_aux = [
+                k for k in unexpected_keys if "progress_head" in k or "tip_target_head" in k
+            ]
+            if dropped_aux:
+                logging.info(
+                    f"auxiliary head weights in checkpoint ignored (head disabled): {dropped_aux}"
+                )
+                unexpected_keys = [k for k in unexpected_keys if k not in dropped_aux]
             mismatched_keys = loading_info.get("mismatched_keys", [])
             other_missing = [
-                k for k in missing_keys if "mask_token" not in k and "progress_head" not in k
+                k
+                for k in missing_keys
+                if "mask_token" not in k and "progress_head" not in k and "tip_target_head" not in k
             ]
             errors = []
             if other_missing:

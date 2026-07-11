@@ -614,6 +614,11 @@ class Gr00tN1d7Processor(BaseProcessor):
             transformed_inputs["progress"] = torch.as_tensor(
                 content.metadata["progress"], dtype=torch.get_default_dtype()
             )
+        # Auxiliary tip-target label for the tip-target head (shape (9,)), if present.
+        if content.metadata and "tip_target_9d" in content.metadata:
+            transformed_inputs["tip_target_9d"] = torch.as_tensor(
+                content.metadata["tip_target_9d"], dtype=torch.get_default_dtype()
+            )
         return transformed_inputs
 
     def _get_vlm_inputs(

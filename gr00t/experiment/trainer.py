@@ -376,8 +376,16 @@ class Gr00tTrainer(Trainer):
                 aux_logs["progress_loss"] = float(progress_loss.detach().item())
             progress_pred = outputs.get("progress_pred")
             if progress_pred is not None:
-                aux_logs["progress_pred_mean"] = float(
-                    progress_pred.detach().float().mean().item()
+                aux_logs["progress_pred_mean"] = float(progress_pred.detach().float().mean().item())
+            tip_target_loss = outputs.get("tip_target_loss")
+            if tip_target_loss is not None:
+                aux_logs["tip_target_loss"] = float(tip_target_loss.detach().item())
+            tip_target_pred = outputs.get("tip_target_pred")
+            if tip_target_pred is not None:
+                # Mean predicted tip->target distance (metres) — should track the
+                # dataset's distance distribution as the head converges.
+                aux_logs["tip_target_dist_pred_mean"] = float(
+                    tip_target_pred.detach().float()[..., :3].norm(dim=-1).mean().item()
                 )
             if aux_logs:
                 self.log(aux_logs)

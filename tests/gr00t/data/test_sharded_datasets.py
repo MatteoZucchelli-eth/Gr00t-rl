@@ -317,3 +317,59 @@ class TestShardedSingleStepDataset:
 
         # effective = 50 - 8 + 1 = 43
         assert dataset.get_effective_episode_length(0) == 43
+
+
+class TestExtractStepData:
+    """Test per-step extraction, in particular history (negative delta) handling."""
+
+    @staticmethod
+    def _episode_data(length=10):
+        import pandas as pd
+
+        return pd.DataFrame(
+            {
+                "video.cam": [f"frame_{i}" for i in range(length)],
+                "state.x": [np.array([float(i)]) for i in range(length)],
+                "action.x": [np.array([float(i)]) for i in range(length)],
+                "language.task": ["do the thing"] * length,
+            }
+        )
+
+    @staticmethod
+    def _modality_configs(video_deltas):
+        from gr00t.data.types import ModalityConfig
+
+        return {
+            "video": ModalityConfig(delta_indices=video_deltas, modality_keys=["cam"]),
+            "state": ModalityConfig(delta_indices=[0], modality_keys=["x"]),
+            "action": ModalityConfig(delta_indices=list(range(4)), modality_keys=["x"]),
+            "language": ModalityConfig(delta_indices=[0], modality_keys=["task"]),
+        }
+
+    def test_negative_delta_pads_with_first_frame(self):
+        """History indices before the episode start repeat frame 0 (no .iloc wraparound)."""
+        from gr00t.data.dataset.sharded_single_step_dataset import extract_step_data
+        from gr00t.data.embodiment_tags import EmbodimentTag
+
+        step_data = extract_step_data(
+            episode_data=self._episode_data(),
+            step_index=0,
+            modality_configs=self._modality_configs(video_deltas=[-1, 0]),
+            embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
+            allow_padding=False,
+        )
+        # Previously index -1 wrapped around to the LAST frame ("frame_9").
+        assert step_data.images["cam"] == ["frame_0", "frame_0"]
+
+    def test_negative_delta_normal_case_unaffected(self):
+        from gr00t.data.dataset.sharded_single_step_dataset import extract_step_data
+        from gr00t.data.embodiment_tags import EmbodimentTag
+
+        step_data = extract_step_data(
+            episode_data=self._episode_data(),
+            step_index=3,
+            modality_configs=self._modality_configs(video_deltas=[-1, 0]),
+            embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
+            allow_padding=False,
+        )
+        assert step_data.images["cam"] == ["frame_2", "frame_3"]

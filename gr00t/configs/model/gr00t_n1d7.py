@@ -138,6 +138,27 @@ class Gr00tN1d7Config(PretrainedConfig):
     progress_conditioning_noise_std: float = 0.05
     progress_hidden_dim: int = 512
 
+    # Tip-target head parameters (structure mirrors the progress head above).
+    # When enabled, an auxiliary head pools the VLM latent and regresses the
+    # target pose in the end-effector (drill-tip) frame as xyz(3) + rot6d(6)
+    # (the `next.tip_target_9d` column in the parquet). xyz is divided by
+    # `tip_target_xyz_scale` inside the head so the position error (metres) and
+    # the unit-scale rot6d contribute comparable MSE gradients; the distance to
+    # target is derived as ||xyz|| rather than regressed separately. rot6d is
+    # trained with raw MSE and only orthonormalized (Gram-Schmidt) at inference
+    # (Zhou et al., CVPR 2019). Conditioning is taught by teacher forcing
+    # exactly like the progress head: training conditions on the ground-truth
+    # 9d (plus small noise), inference on the head's own prediction. Frames
+    # with NaN labels are excluded from the loss and conditioned on the
+    # (detached) prediction instead.
+    use_tip_target_head: bool = False
+    tip_target_loss_weight: float = 0.5
+    use_tip_target_conditioning: bool = True
+    tip_target_xyz_scale: float = 0.1  # metres; xyz is divided by this inside the head
+    tip_target_conditioning_noise_xyz: float = 0.005  # metres; teacher-forcing noise std
+    tip_target_conditioning_noise_rot: float = 0.02  # rot6d units; teacher-forcing noise std
+    tip_target_hidden_dim: int = 512
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         for key, value in kwargs.items():

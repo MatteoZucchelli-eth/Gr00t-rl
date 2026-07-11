@@ -70,6 +70,25 @@ class FinetuneConfig:
     a finer-motion regime as the task approaches completion. Teacher-forced: training conditions on
     the ground-truth progress (+ small noise), inference on the head's predicted progress."""
 
+    use_tip_target_head: bool = False
+    """If True, add an auxiliary head that predicts the target pose in the end-effector (tip) frame
+    as xyz(3) + rot6d(6) from the VLM latent (target = the `next.tip_target_9d` column in the
+    parquet; NaN rows are masked out). The distance to target is derived as ||xyz||. Useful for
+    precise end-effector placement: the action head is conditioned on where the target is relative
+    to the tip."""
+
+    tip_target_loss_weight: float = 0.5
+    """Weight on the tip-target MSE loss when added to the action loss (only used if use_tip_target_head)."""
+
+    use_tip_target_conditioning: bool = True
+    """If True, feed the tip-target 9d back as a conditioning token to the action head.
+    Teacher-forced: training conditions on the ground truth (+ small noise), inference on the
+    head's prediction."""
+
+    tip_target_xyz_scale: float = 0.1
+    """Scale (metres) dividing the xyz part of the tip-target label inside the head so position and
+    rot6d errors contribute comparable gradients. Stored in the model config so inference matches."""
+
     state_dropout_prob: float = 0.2
     """
     Dropout probability applied to state inputs for regularization during training.

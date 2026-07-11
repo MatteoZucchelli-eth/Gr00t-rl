@@ -114,12 +114,17 @@ class TestActionHeadForward:
         out = head.forward(_make_backbone_output(config), _make_action_input(config))
         assert out["action_loss"].shape == (2, config.action_horizon, config.max_action_dim)
 
-    def test_forward_with_state_dropout(self):
-        config = _small_config(state_dropout_prob=0.5)
+    def test_head_does_not_apply_state_dropout(self):
+        # State dropout is owned by the processor (raw states); the head must not
+        # re-apply it to the encoded features (double dropout). With prob=1.0 the
+        # old head-side dropout would zero every state feature entering the DiT.
+        config = _small_config(state_dropout_prob=1.0)
         head = Gr00tN1d7ActionHead(config)
         head.train()
-        out = head.forward(_make_backbone_output(config), _make_action_input(config))
+        action_input = _make_action_input(config)
+        out = head.forward(_make_backbone_output(config), action_input)
         assert torch.isfinite(out["loss"])
+        assert out["state_features"].abs().sum() > 0
 
 
 class TestActionHeadGetAction:
@@ -187,3 +192,132 @@ class TestActionHeadTrainableParams:
         head.set_trainable_parameters(True, False, True)
         for p in head.model.parameters():
             assert not p.requires_grad
+
+
+class TestTipTargetHead:
+    """Test the optional tip-target auxiliary head (xyz + rot6d regression)."""
+
+    @staticmethod
+    def _tip_config(**overrides):
+        defaults = dict(use_tip_target_head=True, tip_target_loss_weight=0.5)
+        defaults.update(overrides)
+        return _small_config(**defaults)
+
+    @staticmethod
+    def _tip_target(batch_size=2):
+        target = torch.randn(batch_size, 9) * 0.1
+        target[:, 3:] = torch.nn.functional.normalize(target[:, 3:], dim=-1)
+        return target
+
+    def test_rot6d_orthonormalize(self):
+        from gr00t.model.gr00t_n1d7.gr00t_n1d7 import rot6d_orthonormalize
+
+        r = rot6d_orthonormalize(torch.randn(4, 6))
+        a, b = r[..., :3], r[..., 3:]
+        assert torch.allclose(a.norm(dim=-1), torch.ones(4), atol=1e-5)
+        assert torch.allclose(b.norm(dim=-1), torch.ones(4), atol=1e-5)
+        assert torch.allclose((a * b).sum(-1), torch.zeros(4), atol=1e-5)
+
+    def test_forward_adds_tip_loss(self):
+        config = self._tip_config()
+        head = Gr00tN1d7ActionHead(config)
+        head.train()
+        action_input = _make_action_input(config)
+        action_input["tip_target_9d"] = self._tip_target()
+        out = head.forward(_make_backbone_output(config), action_input)
+        assert "tip_target_loss" in out
+        assert torch.isfinite(out["tip_target_loss"])
+        assert torch.isfinite(out["loss"])
+        # Total loss = action loss + weight * tip loss.
+        expected = out["action_loss_scalar"] + 0.5 * out["tip_target_loss"]
+        assert torch.allclose(out["loss"], expected, atol=1e-5)
+        # Conditioning appends one token to the single state token.
+        assert out["state_features"].shape[1] == 2
+
+    def test_forward_masks_nan_rows(self):
+        config = self._tip_config()
+        head = Gr00tN1d7ActionHead(config)
+        head.train()
+        action_input = _make_action_input(config)
+        target = self._tip_target()
+        target[0] = float("nan")  # unresolved label on one row
+        action_input["tip_target_9d"] = target
+        out = head.forward(_make_backbone_output(config), action_input)
+        assert torch.isfinite(out["tip_target_loss"])
+        assert torch.isfinite(out["loss"])
+        out["loss"].backward()
+        for p in head.tip_target_head.parameters():
+            if p.grad is not None:
+                assert torch.isfinite(p.grad).all()
+
+    def test_forward_all_nan_skips_tip_loss(self):
+        config = self._tip_config()
+        head = Gr00tN1d7ActionHead(config)
+        head.train()
+        action_input = _make_action_input(config)
+        action_input["tip_target_9d"] = torch.full((2, 9), float("nan"))
+        out = head.forward(_make_backbone_output(config), action_input)
+        assert "tip_target_loss" not in out
+        assert torch.isfinite(out["loss"])
+
+    def test_forward_without_target_conditions_on_prediction(self):
+        config = self._tip_config()
+        head = Gr00tN1d7ActionHead(config)
+        head.train()
+        out = head.forward(_make_backbone_output(config), _make_action_input(config))
+        assert "tip_target_loss" not in out
+        assert "tip_target_pred" in out
+        assert torch.isfinite(out["loss"])
+
+    def test_get_action_returns_orthonormal_prediction(self):
+        config = self._tip_config()
+        head = Gr00tN1d7ActionHead(config)
+        head.eval()
+        action_input = _make_action_input(config)
+        del action_input["action"]
+        out = head.get_action(_make_backbone_output(config), action_input)
+        assert out["action_pred"].shape == (2, config.action_horizon, config.max_action_dim)
+        pred = out["tip_target_pred"]
+        assert pred.shape == (2, 9)
+        a, b = pred[..., 3:6], pred[..., 6:]
+        assert torch.allclose(a.norm(dim=-1), torch.ones(2), atol=1e-4)
+        assert torch.allclose((a * b).sum(-1), torch.zeros(2), atol=1e-4)
+
+    def test_no_conditioning_keeps_single_state_token(self):
+        config = self._tip_config(use_tip_target_conditioning=False)
+        head = Gr00tN1d7ActionHead(config)
+        head.train()
+        action_input = _make_action_input(config)
+        action_input["tip_target_9d"] = self._tip_target()
+        out = head.forward(_make_backbone_output(config), action_input)
+        assert head.tip_target_head.cond_embed is None
+        assert out["state_features"].shape[1] == 1
+        assert "tip_target_loss" in out
+
+    def test_coexists_with_progress_head(self):
+        config = self._tip_config(use_progress_head=True)
+        head = Gr00tN1d7ActionHead(config)
+        head.train()
+        action_input = _make_action_input(config)
+        action_input["tip_target_9d"] = self._tip_target()
+        action_input["progress"] = torch.rand(2, 1)
+        out = head.forward(_make_backbone_output(config), action_input)
+        assert "progress_loss" in out and "tip_target_loss" in out
+        # state token + progress token + tip token
+        assert out["state_features"].shape[1] == 3
+        expected = (
+            out["action_loss_scalar"]
+            + config.progress_loss_weight * out["progress_loss"]
+            + 0.5 * out["tip_target_loss"]
+        )
+        assert torch.allclose(out["loss"], expected, atol=1e-5)
+
+    def test_xyz_scaling_roundtrip(self):
+        from gr00t.model.gr00t_n1d7.gr00t_n1d7 import TipTargetHead
+
+        head = TipTargetHead(
+            latent_dim=8, hidden_dim=8, cond_dim=8, use_conditioning=True, xyz_scale=0.1
+        )
+        raw = self._tip_target()
+        assert torch.allclose(head.unscale(head.scale(raw)), raw, atol=1e-6)
+        assert torch.allclose(head.scale(raw)[..., :3], raw[..., :3] / 0.1)
