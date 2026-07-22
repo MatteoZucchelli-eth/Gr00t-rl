@@ -16,15 +16,17 @@ RUN_NAME="${RUN_NAME:-red_and_green}"
 # (conditioning is on by default via --use-tip-target-conditioning).
 USE_TIP_TARGET_HEAD=true
 TIP_TARGET_LOSS_WEIGHT=0.5       # overall tip-target loss multiplier vs the action loss
-TIP_TARGET_POS_LOSS_WEIGHT=1.0   # distance-normalized xyz term (relative error)
+TIP_TARGET_POS_LOSS_WEIGHT=1.0   # combined xyz term (relative + absolute anchor)
+TIP_TARGET_POS_ABS_WEIGHT=0.2    # absolute MSE anchor: prevents constant-prediction collapse
 TIP_TARGET_ROT_LOSS_WEIGHT=1.0   # rot6d MSE term
-TIP_TARGET_DIST_FLOOR=0.02       # metres; clamp for the xyz loss normalization
+TIP_TARGET_DIST_FLOOR=0.05       # metres; clamp for the xyz loss normalization
 TIP_TARGET_XYZ_SCALE=0.1         # metres; scales xyz inside the head's prediction space
 
 TIP_TARGET_ARGS=""
 [ "$USE_TIP_TARGET_HEAD" = true ] && TIP_TARGET_ARGS="--use-tip-target-head \
     --tip-target-loss-weight ${TIP_TARGET_LOSS_WEIGHT} \
     --tip-target-pos-loss-weight ${TIP_TARGET_POS_LOSS_WEIGHT} \
+    --tip-target-pos-abs-weight ${TIP_TARGET_POS_ABS_WEIGHT} \
     --tip-target-rot-loss-weight ${TIP_TARGET_ROT_LOSS_WEIGHT} \
     --tip-target-dist-floor ${TIP_TARGET_DIST_FLOOR} \
     --tip-target-xyz-scale ${TIP_TARGET_XYZ_SCALE}"

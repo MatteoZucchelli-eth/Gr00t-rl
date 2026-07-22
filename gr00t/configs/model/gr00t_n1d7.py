@@ -141,9 +141,10 @@ class Gr00tN1d7Config(PretrainedConfig):
     # the loss and conditioned on the (detached) prediction instead.
     use_tip_target_head: bool = False
     tip_target_loss_weight: float = 0.5  # overall multiplier vs the action loss
-    tip_target_pos_loss_weight: float = 1.0  # weight of the distance-normalized xyz term
+    tip_target_pos_loss_weight: float = 1.0  # weight of the combined xyz term
+    tip_target_pos_abs_weight: float = 0.2  # absolute (scaled MSE) anchor inside the xyz term
     tip_target_rot_loss_weight: float = 1.0  # weight of the rot6d MSE term
-    tip_target_dist_floor: float = 0.02  # metres; distance clamp for the pos normalization
+    tip_target_dist_floor: float = 0.05  # metres; distance clamp for the pos normalization
     use_tip_target_conditioning: bool = True
     tip_target_xyz_scale: float = 0.1  # metres; xyz is divided by this inside the head
     tip_target_conditioning_noise_xyz: float = 0.005  # metres; teacher-forcing noise std

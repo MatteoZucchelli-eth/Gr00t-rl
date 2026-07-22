@@ -92,6 +92,7 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 use_tip_target_head=self.config.model.use_tip_target_head,
                 tip_target_loss_weight=self.config.model.tip_target_loss_weight,
                 tip_target_pos_loss_weight=self.config.model.tip_target_pos_loss_weight,
+                tip_target_pos_abs_weight=self.config.model.tip_target_pos_abs_weight,
                 tip_target_rot_loss_weight=self.config.model.tip_target_rot_loss_weight,
                 tip_target_dist_floor=self.config.model.tip_target_dist_floor,
                 use_tip_target_conditioning=self.config.model.use_tip_target_conditioning,
@@ -112,11 +113,16 @@ class Gr00tN1d7Pipeline(ModelPipeline):
 
             # The optional tip-target head is newly added on top of a base
             # checkpoint that has no such weights, so its parameters are
-            # expected to be missing and are left at their fresh initialization.
+            # expected to be missing. They must be explicitly re-initialized:
+            # from_pretrained materializes the model on the meta device, and
+            # transformers' missing-key fallback leaves bare nn.Parameters
+            # (pool_queries) as uninitialized memory, which NaNs the head's
+            # attention on the first forward.
             if self.config.model.use_tip_target_head and any(
                 "tip_target_head" in key for key in missing_keys
             ):
-                logging.info("tip_target_head not in checkpoint - initialized")
+                model.action_head.tip_target_head.reset_parameters()
+                logging.info("tip_target_head not in checkpoint - re-initialized explicitly")
 
             unexpected_keys = loading_info.get("unexpected_keys", [])
             # Mirror the missing-keys tolerance above: a checkpoint trained WITH

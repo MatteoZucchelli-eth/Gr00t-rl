@@ -70,15 +70,23 @@ class FinetuneConfig:
 
     tip_target_pos_loss_weight: float = 1.0
     """Weight of the position term: squared xyz error normalized by the distance to the target
-    (clamped to tip_target_dist_floor). Relative error, so close-range frames contribute as much
-    gradient as far ones -- plain MSE would spend nearly all gradient on far, coarse frames."""
+    (clamped to tip_target_dist_floor), plus an absolute anchor (see tip_target_pos_abs_weight).
+    The relative part gives close-range frames as much gradient as far ones -- plain MSE would
+    spend nearly all gradient on far, coarse frames."""
+
+    tip_target_pos_abs_weight: float = 0.2
+    """Weight of the absolute (scaled-space MSE) anchor inside the position term. Required: a
+    purely relative loss caps far-range error cost at ~1 per frame, making 'always predict the
+    close-range mean' a cheap constant minimizer (observed collapse). Raise to prioritize
+    far-range fidelity, lower (not to 0) to prioritize close-range precision."""
 
     tip_target_rot_loss_weight: float = 1.0
     """Weight of the rotation term: plain MSE on the raw rot6d part of the prediction."""
 
-    tip_target_dist_floor: float = 0.02
+    tip_target_dist_floor: float = 0.05
     """Distance floor (metres) for the position-loss normalization. Below this distance the
-    divisor stops shrinking, so the loss does not blow up as the tip reaches the target."""
+    divisor stops shrinking, so the loss does not blow up as the tip reaches the target. Also
+    bounds how much extra weight close frames get vs far ones ((far/floor)^2)."""
 
     use_tip_target_conditioning: bool = True
     """If True, feed the tip-target 9d back as a conditioning token to the action head.

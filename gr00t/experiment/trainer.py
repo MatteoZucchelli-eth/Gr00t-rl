@@ -374,7 +374,12 @@ class Gr00tTrainer(Trainer):
             tip_target_loss = outputs.get("tip_target_loss")
             if tip_target_loss is not None:
                 aux_logs["tip_target_loss"] = float(tip_target_loss.detach().item())
-            for key in ("tip_target_pos_loss", "tip_target_rot_loss"):
+            for key in (
+                "tip_target_pos_loss",
+                "tip_target_pos_rel_loss",
+                "tip_target_pos_abs_loss",
+                "tip_target_rot_loss",
+            ):
                 value = outputs.get(key)
                 if value is not None:
                     aux_logs[key] = float(value.detach().item())

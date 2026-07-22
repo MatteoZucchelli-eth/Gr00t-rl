@@ -95,6 +95,24 @@ class TipTargetHead(nn.Module):
         else:
             self.cond_embed = None
 
+    def reset_parameters(self) -> None:
+        """Re-initialize every parameter of the head to its intended fresh state.
+
+        MUST be called after `from_pretrained` whenever the head's keys were
+        missing from the checkpoint: transformers materializes the model on the
+        meta device, so constructor init values are lost, and its missing-key
+        fallback does not initialize bare `nn.Parameter`s like `pool_queries`
+        (they come back as uninitialized/zero memory -- garbage queries NaN the
+        attention softmax on the first forward).
+        """
+        with torch.no_grad():
+            self.pool_queries.normal_(0.0, 0.02)
+        self.pool_attn._reset_parameters()
+        self.pool_norm.reset_parameters()
+        for module in list(self.predictor) + (list(self.cond_embed) if self.cond_embed else []):
+            if isinstance(module, nn.Linear):
+                module.reset_parameters()
+
     def predict_scaled(
         self, vl_embeds: torch.Tensor, attention_mask: torch.Tensor | None = None
     ) -> torch.Tensor:
@@ -194,8 +212,9 @@ class Gr00tN1d7ActionHead(nn.Module):
         if self.use_tip_target_head:
             self.tip_target_loss_weight = config.tip_target_loss_weight
             self.tip_target_pos_loss_weight = getattr(config, "tip_target_pos_loss_weight", 1.0)
+            self.tip_target_pos_abs_weight = getattr(config, "tip_target_pos_abs_weight", 0.2)
             self.tip_target_rot_loss_weight = getattr(config, "tip_target_rot_loss_weight", 1.0)
-            self.tip_target_dist_floor = getattr(config, "tip_target_dist_floor", 0.02)
+            self.tip_target_dist_floor = getattr(config, "tip_target_dist_floor", 0.05)
             self.use_tip_target_conditioning = config.use_tip_target_conditioning
             self.tip_target_head = TipTargetHead(
                 latent_dim=config.backbone_embedding_dim,
@@ -420,7 +439,12 @@ class Gr00tN1d7ActionHead(nn.Module):
         # Tip-target head: two terms over rows with a resolved label.
         #   pos: squared xyz error in metres, divided by the (clamped) distance to
         #        the target -- relative error, so close-range frames get as much
-        #        gradient as far ones instead of being drowned out by them.
+        #        gradient as far ones instead of being drowned out by them --
+        #        PLUS an absolute (scaled-space) MSE anchor. The anchor is
+        #        essential: a purely relative loss caps the cost of far-range
+        #        errors at ~1 per frame, which makes "always predict the
+        #        close-range mean" a cheap constant minimizer (observed
+        #        collapse). The absolute term makes that constant expensive.
         #   rot: plain MSE on the raw rot6d part (unit scale, already accurate).
         if self.use_tip_target_head and tip_pred_scaled is not None:
             outputs["tip_target_pred"] = self.tip_target_head.unscale(
@@ -434,13 +458,17 @@ class Gr00tN1d7ActionHead(nn.Module):
                 xyz_residual_m = (pred_v[:, :3] - tgt_v[:, :3]) * xyz_scale
                 dist_m = torch.linalg.vector_norm(tgt_v[:, :3] * xyz_scale, dim=-1, keepdim=True)
                 rel_residual = xyz_residual_m / dist_m.clamp_min(self.tip_target_dist_floor)
-                tip_pos_loss = rel_residual.pow(2).mean()
+                tip_pos_rel_loss = rel_residual.pow(2).mean()
+                tip_pos_abs_loss = F.mse_loss(pred_v[:, :3], tgt_v[:, :3])
+                tip_pos_loss = tip_pos_rel_loss + self.tip_target_pos_abs_weight * tip_pos_abs_loss
                 tip_rot_loss = F.mse_loss(pred_v[:, 3:], tgt_v[:, 3:])
                 tip_target_loss = (
                     self.tip_target_pos_loss_weight * tip_pos_loss
                     + self.tip_target_rot_loss_weight * tip_rot_loss
                 )
                 outputs["tip_target_pos_loss"] = tip_pos_loss
+                outputs["tip_target_pos_rel_loss"] = tip_pos_rel_loss
+                outputs["tip_target_pos_abs_loss"] = tip_pos_abs_loss
                 outputs["tip_target_rot_loss"] = tip_rot_loss
                 outputs["tip_target_loss"] = tip_target_loss
                 outputs["loss"] = outputs["loss"] + self.tip_target_loss_weight * tip_target_loss

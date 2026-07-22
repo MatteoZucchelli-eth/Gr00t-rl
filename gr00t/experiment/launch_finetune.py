@@ -105,6 +105,7 @@ if __name__ == "__main__":
     config.model.use_tip_target_head = ft_config.use_tip_target_head
     config.model.tip_target_loss_weight = ft_config.tip_target_loss_weight
     config.model.tip_target_pos_loss_weight = ft_config.tip_target_pos_loss_weight
+    config.model.tip_target_pos_abs_weight = ft_config.tip_target_pos_abs_weight
     config.model.tip_target_rot_loss_weight = ft_config.tip_target_rot_loss_weight
     config.model.tip_target_dist_floor = ft_config.tip_target_dist_floor
     config.model.use_tip_target_conditioning = ft_config.use_tip_target_conditioning
