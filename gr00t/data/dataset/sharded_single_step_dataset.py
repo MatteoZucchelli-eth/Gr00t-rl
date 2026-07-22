@@ -75,14 +75,9 @@ def extract_step_data(
     assert len(language_data) == 1, f"Expected 1 language, got {len(language_data)}"
     text = language_data[list(language_data.keys())[0]][0]
 
-    # Surface the auxiliary progress target (current step) via metadata so it can
-    # reach the progress head without being treated as a GR00T modality.
+    # Surface the tip-target label (current step) via metadata so it can reach
+    # the tip-target head without being treated as a GR00T modality.
     metadata: dict = {}
-    if "progress" in episode_data.columns:
-        metadata["progress"] = np.asarray(
-            [episode_data["progress"].iloc[step_index]], dtype=np.float32
-        )
-    # Tip-target label (current step) for the optional tip-target head.
     if "tip_target_9d" in episode_data.columns:
         metadata["tip_target_9d"] = np.asarray(
             episode_data["tip_target_9d"].iloc[step_index], dtype=np.float32

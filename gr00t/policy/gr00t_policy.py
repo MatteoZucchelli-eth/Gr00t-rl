@@ -471,20 +471,11 @@ class Gr00tPolicy(BasePolicy):
                     model_pred["image_mask"].cpu().numpy()
                 )  # [B, seq_len] bool: image-token positions
 
-        # Surface the predicted task progress (progress head) so callers can use it
-        # as a coarse->fine handoff / transition trigger.
-        if "progress_pred" in model_pred:
-            info["progress_pred"] = (
-                model_pred["progress_pred"].float().cpu().numpy()
-            )  # [B, 1] in [0, 1]
-
         # Surface the predicted tip-frame target pose (tip-target head):
         # xyz(3, metres) + orthonormalized rot6d(6). ||xyz|| is the predicted
         # distance to target.
         if "tip_target_pred" in model_pred:
-            info["tip_target_pred"] = (
-                model_pred["tip_target_pred"].float().cpu().numpy()
-            )  # [B, 9]
+            info["tip_target_pred"] = model_pred["tip_target_pred"].float().cpu().numpy()  # [B, 9]
 
         return casted_action, info
 

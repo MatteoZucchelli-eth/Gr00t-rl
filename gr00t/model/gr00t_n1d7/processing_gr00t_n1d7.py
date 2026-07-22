@@ -609,11 +609,6 @@ class Gr00tN1d7Processor(BaseProcessor):
         if action_mask is not None:
             transformed_inputs["action_mask"] = action_mask
         transformed_inputs["embodiment_id"] = self.embodiment_id_mapping[embodiment_tag.value]
-        # Auxiliary progress target for the progress head (shape (1,)), if present.
-        if content.metadata and "progress" in content.metadata:
-            transformed_inputs["progress"] = torch.as_tensor(
-                content.metadata["progress"], dtype=torch.get_default_dtype()
-            )
         # Auxiliary tip-target label for the tip-target head (shape (9,)), if present.
         if content.metadata and "tip_target_9d" in content.metadata:
             transformed_inputs["tip_target_9d"] = torch.as_tensor(

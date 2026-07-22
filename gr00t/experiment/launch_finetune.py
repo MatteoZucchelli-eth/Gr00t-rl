@@ -93,22 +93,20 @@ if __name__ == "__main__":
 
     # Image resolution fed to the VLM. Set the (target, crop) pair together and leave
     # shortest_image_edge / crop_fraction as None (experiment.py validates this).
-    assert (
-        ft_config.image_crop_size < ft_config.image_target_size
-    ), "image_crop_size must be smaller than image_target_size"
+    assert ft_config.image_crop_size < ft_config.image_target_size, (
+        "image_crop_size must be smaller than image_target_size"
+    )
     config.model.image_target_size = (ft_config.image_target_size, ft_config.image_target_size)
     config.model.image_crop_size = (ft_config.image_crop_size, ft_config.image_crop_size)
     config.model.shortest_image_edge = None
     config.model.crop_fraction = None
 
-    # Optional progress / time-to-completion head.
-    config.model.use_progress_head = ft_config.use_progress_head
-    config.model.progress_loss_weight = ft_config.progress_loss_weight
-    config.model.use_progress_conditioning = ft_config.use_progress_conditioning
-
     # Optional tip-target head.
     config.model.use_tip_target_head = ft_config.use_tip_target_head
     config.model.tip_target_loss_weight = ft_config.tip_target_loss_weight
+    config.model.tip_target_pos_loss_weight = ft_config.tip_target_pos_loss_weight
+    config.model.tip_target_rot_loss_weight = ft_config.tip_target_rot_loss_weight
+    config.model.tip_target_dist_floor = ft_config.tip_target_dist_floor
     config.model.use_tip_target_conditioning = ft_config.use_tip_target_conditioning
     config.model.tip_target_xyz_scale = ft_config.tip_target_xyz_scale
 

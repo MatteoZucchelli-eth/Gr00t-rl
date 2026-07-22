@@ -89,11 +89,11 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 state_dropout_prob=self.config.model.state_dropout_prob,
                 backbone_trainable_params_fp32=self.config.model.backbone_trainable_params_fp32,
                 load_bf16=self.config.model.load_bf16,
-                use_progress_head=self.config.model.use_progress_head,
-                progress_loss_weight=self.config.model.progress_loss_weight,
-                use_progress_conditioning=self.config.model.use_progress_conditioning,
                 use_tip_target_head=self.config.model.use_tip_target_head,
                 tip_target_loss_weight=self.config.model.tip_target_loss_weight,
+                tip_target_pos_loss_weight=self.config.model.tip_target_pos_loss_weight,
+                tip_target_rot_loss_weight=self.config.model.tip_target_rot_loss_weight,
+                tip_target_dist_floor=self.config.model.tip_target_dist_floor,
                 use_tip_target_conditioning=self.config.model.use_tip_target_conditioning,
                 tip_target_xyz_scale=self.config.model.tip_target_xyz_scale,
                 transformers_loading_kwargs=self.transformers_loading_kwargs,
@@ -110,13 +110,9 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                     )
                 logging.info("mask_token not in checkpoint - initialized")
 
-            # The optional progress and tip-target heads are newly added on top
-            # of a base checkpoint that has no such weights, so their parameters
-            # are expected to be missing and are left at their fresh initialization.
-            if self.config.model.use_progress_head and any(
-                "progress_head" in key for key in missing_keys
-            ):
-                logging.info("progress_head not in checkpoint - initialized")
+            # The optional tip-target head is newly added on top of a base
+            # checkpoint that has no such weights, so its parameters are
+            # expected to be missing and are left at their fresh initialization.
             if self.config.model.use_tip_target_head and any(
                 "tip_target_head" in key for key in missing_keys
             ):
@@ -269,4 +265,3 @@ class Gr00tN1d7Pipeline(ModelPipeline):
 
 
 register_model(Gr00tN1d7Config, Gr00tN1d7Pipeline)
-

@@ -393,14 +393,9 @@ class LeRobotEpisodeLoader:
             for joint_group in joint_groups_df.columns:
                 loaded_df[f"{modality_type}.{joint_group}"] = joint_groups_df[joint_group]
 
-        # Auxiliary per-frame task-progress target (in [0, 1]) for the optional
-        # progress head. Not a GR00T modality -- carried through as a plain column
-        # and surfaced via VLAStepData.metadata in extract_step_data().
-        if "next.progress" in original_df.columns:
-            loaded_df["progress"] = original_df["next.progress"].astype("float32")
-
         # Auxiliary per-frame tip-target label (xyz(3) + rot6d(6), tip frame) for
-        # the optional tip-target head; same pass-through mechanism as progress.
+        # the optional tip-target head. Not a GR00T modality -- carried through as
+        # a plain column and surfaced via VLAStepData.metadata in extract_step_data().
         # Unresolved frames are NaN and are masked out of the loss by the head.
         if "next.tip_target_9d" in original_df.columns:
             loaded_df["tip_target_9d"] = original_df["next.tip_target_9d"].map(

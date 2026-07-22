@@ -28,7 +28,10 @@ Args:
     modality_config_path: Optional path to a .py config file for custom embodiment tags not in the built-in registry.
 """
 
+from concurrent.futures import ProcessPoolExecutor
 import json
+import multiprocessing as mp
+import os
 from pathlib import Path
 
 import numpy as np
@@ -132,25 +135,44 @@ def generate_stats(dataset_path: Path | str):
 
 
 class RelativeActionLoader:
-    def __init__(self, dataset_path: Path | str, embodiment_tag: EmbodimentTag, action_key: str):
+    def __init__(
+        self,
+        dataset_path: Path | str,
+        embodiment_tag: EmbodimentTag,
+        action_key: str,
+        embodiment_config: dict[str, ModalityConfig] | None = None,
+    ):
+        """
+        Args:
+            embodiment_config: The resolved MODALITY_CONFIGS[embodiment_tag.value] entry to use.
+                If None, it is looked up from the global MODALITY_CONFIGS registry. Callers that
+                construct this loader inside a spawned worker process (e.g. via
+                ProcessPoolExecutor with the "spawn" context) MUST pass this explicitly: custom
+                embodiments (e.g. NEW_EMBODIMENT) are registered into MODALITY_CONFIGS at runtime
+                via register_modality_config(), and that registration lives only in the process
+                that ran it -- a freshly spawned worker re-imports gr00t.data.stats from scratch
+                and never replays it, so the registry lookup would raise KeyError there.
+        """
         self.dataset_path = Path(dataset_path)
         self.modality_configs: dict[str, ModalityConfig] = {}
         self.action_key = action_key
+        if embodiment_config is None:
+            embodiment_config = MODALITY_CONFIGS[embodiment_tag.value]
         # Check action config
-        assert action_key in MODALITY_CONFIGS[embodiment_tag.value]["action"].modality_keys
-        idx = MODALITY_CONFIGS[embodiment_tag.value]["action"].modality_keys.index(action_key)
-        action_configs = MODALITY_CONFIGS[embodiment_tag.value]["action"].action_configs
-        assert action_configs is not None, MODALITY_CONFIGS[embodiment_tag.value]["action"]
+        assert action_key in embodiment_config["action"].modality_keys
+        idx = embodiment_config["action"].modality_keys.index(action_key)
+        action_configs = embodiment_config["action"].action_configs
+        assert action_configs is not None, embodiment_config["action"]
         self.action_config = action_configs[idx]
         self.modality_configs["action"] = ModalityConfig(
-            delta_indices=MODALITY_CONFIGS[embodiment_tag.value]["action"].delta_indices,
+            delta_indices=embodiment_config["action"].delta_indices,
             modality_keys=[action_key],
         )
         # Check state config
         state_key = self.action_config.state_key or action_key
-        assert state_key in MODALITY_CONFIGS[embodiment_tag.value]["state"].modality_keys
+        assert state_key in embodiment_config["state"].modality_keys
         self.modality_configs["state"] = ModalityConfig(
-            delta_indices=MODALITY_CONFIGS[embodiment_tag.value]["state"].delta_indices,
+            delta_indices=embodiment_config["state"].delta_indices,
             modality_keys=[state_key],
         )
         # Check state-action consistency
@@ -203,18 +225,95 @@ class RelativeActionLoader:
         return len(self.loader)
 
 
+# Per-worker RelativeActionLoader, built once in each pool process so we don't
+# re-parse dataset metadata for every episode.
+_WORKER_LOADER: "RelativeActionLoader | None" = None
+
+
+def _init_stats_worker(
+    dataset_path: Path | str,
+    embodiment_tag: EmbodimentTag,
+    group_key: str,
+    embodiment_config: dict[str, ModalityConfig],
+) -> None:
+    global _WORKER_LOADER
+    _WORKER_LOADER = RelativeActionLoader(
+        dataset_path, embodiment_tag, group_key, embodiment_config=embodiment_config
+    )
+
+
+def _worker_load_relative_actions(episode_id: int) -> list[np.ndarray]:
+    assert _WORKER_LOADER is not None
+    return _WORKER_LOADER.load_relative_actions(episode_id)
+
+
+def _resolve_num_workers(num_workers: int | None, num_items: int) -> int:
+    """Number of processes to use for trajectory loading.
+
+    Defaults to the CPU allocation visible to the process (respecting cgroup/affinity
+    limits), overridable via GR00T_STATS_NUM_WORKERS. Capped at 16 to bound memory and
+    IPC overhead, and never more than the number of episodes.
+    """
+    if num_workers is None:
+        env = os.environ.get("GR00T_STATS_NUM_WORKERS")
+        if env is not None:
+            num_workers = int(env)
+        else:
+            try:
+                available = len(os.sched_getaffinity(0))
+            except AttributeError:  # not available on all platforms
+                available = os.cpu_count() or 1
+            num_workers = min(available, 16)
+    return max(1, min(num_workers, num_items))
+
+
 def calculate_stats_for_key(
     dataset_path: Path | str,
     embodiment_tag: EmbodimentTag,
     group_key: str,
     max_episodes: int = -1,
+    num_workers: int | None = None,
 ) -> dict:
-    loader = RelativeActionLoader(dataset_path, embodiment_tag, group_key)
+    # Resolve once in this process. Custom embodiments (e.g. NEW_EMBODIMENT) are registered
+    # into MODALITY_CONFIGS at runtime, and that registration doesn't exist in the spawned
+    # worker processes below -- so we pass the resolved dict down to them explicitly instead
+    # of letting each worker redo the (process-local) registry lookup.
+    embodiment_config = MODALITY_CONFIGS[embodiment_tag.value]
+    loader = RelativeActionLoader(
+        dataset_path, embodiment_tag, group_key, embodiment_config=embodiment_config
+    )
+    num_episodes = len(loader)
+    if max_episodes != -1:
+        num_episodes = min(num_episodes, max_episodes)
+    episode_ids = list(range(num_episodes))
+
+    resolved_workers = _resolve_num_workers(num_workers, num_episodes)
     trajectories = []
-    for episode_id in tqdm(range(len(loader)), desc=f"Loading trajectories for key {group_key}"):
-        if max_episodes != -1 and episode_id >= max_episodes:
-            break
-        trajectories.extend(loader.load_relative_actions(episode_id))
+    desc = f"Loading trajectories for key {group_key}"
+    if resolved_workers == 1:
+        for episode_id in tqdm(episode_ids, desc=desc):
+            trajectories.extend(loader.load_relative_actions(episode_id))
+    else:
+        # Loading is CPU-bound per-timestep pose math, so fan out across processes.
+        # Trajectory order does not affect min/max/quantile/mean/std, and ProcessPoolExecutor.map
+        # preserves input order anyway, so the result is identical to the serial path.
+        # Use a spawn context: this may run after CUDA is initialized (e.g. inside the
+        # dataset factory on rank 0), where forking a CUDA-aware process is unsafe.
+        del loader  # each worker builds its own; avoid holding a second copy
+        ctx = mp.get_context("spawn")
+        chunksize = max(1, num_episodes // (resolved_workers * 8))
+        with ProcessPoolExecutor(
+            max_workers=resolved_workers,
+            mp_context=ctx,
+            initializer=_init_stats_worker,
+            initargs=(dataset_path, embodiment_tag, group_key, embodiment_config),
+        ) as executor:
+            for episode_trajectories in tqdm(
+                executor.map(_worker_load_relative_actions, episode_ids, chunksize=chunksize),
+                total=num_episodes,
+                desc=desc,
+            ):
+                trajectories.extend(episode_trajectories)
     return {
         "max": np.max(trajectories, axis=0),
         "min": np.min(trajectories, axis=0),

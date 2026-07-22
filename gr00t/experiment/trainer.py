@@ -359,7 +359,7 @@ class Gr00tTrainer(Trainer):
                 )
 
         # --------------------------------------------------------------
-        # Auxiliary loss terms (e.g. progress head) -> loggers / wandb
+        # Auxiliary loss terms (e.g. tip-target head) -> loggers / wandb
         # --------------------------------------------------------------
         if (
             self.state.global_step % self.args.logging_steps == 0
@@ -371,15 +371,13 @@ class Gr00tTrainer(Trainer):
             action_loss_scalar = outputs.get("action_loss_scalar")
             if action_loss_scalar is not None:
                 aux_logs["action_loss"] = float(action_loss_scalar.detach().item())
-            progress_loss = outputs.get("progress_loss")
-            if progress_loss is not None:
-                aux_logs["progress_loss"] = float(progress_loss.detach().item())
-            progress_pred = outputs.get("progress_pred")
-            if progress_pred is not None:
-                aux_logs["progress_pred_mean"] = float(progress_pred.detach().float().mean().item())
             tip_target_loss = outputs.get("tip_target_loss")
             if tip_target_loss is not None:
                 aux_logs["tip_target_loss"] = float(tip_target_loss.detach().item())
+            for key in ("tip_target_pos_loss", "tip_target_rot_loss"):
+                value = outputs.get(key)
+                if value is not None:
+                    aux_logs[key] = float(value.detach().item())
             tip_target_pred = outputs.get("tip_target_pred")
             if tip_target_pred is not None:
                 # Mean predicted tip->target distance (metres) — should track the

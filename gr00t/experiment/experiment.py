@@ -133,7 +133,12 @@ def run(config: Config):
     if dist.is_initialized():
         global_rank = dist.get_rank()
     elif "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
-        dist.init_process_group(backend="nccl", timeout=datetime.timedelta(hours=2))
+        # Stats pre-generation above runs only on rank 0; other ranks wait at the first
+        # collective (the barrier in DatasetFactory). Keep this timeout comfortably larger
+        # than the slowest expected stats build so those ranks don't die waiting. Override
+        # with GR00T_DIST_TIMEOUT_HOURS for pathologically large datasets.
+        timeout_hours = float(os.environ.get("GR00T_DIST_TIMEOUT_HOURS", "2"))
+        dist.init_process_group(backend="nccl", timeout=datetime.timedelta(hours=timeout_hours))
         # only meaningful for torchrun, for ray it is always 0
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)

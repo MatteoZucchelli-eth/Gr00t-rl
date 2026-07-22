@@ -57,19 +57,6 @@ class FinetuneConfig:
     tune_diffusion_model: bool = True
     """If True, fine-tune the diffusion-based action decoder (if present in the model)."""
 
-    use_progress_head: bool = False
-    """If True, add an auxiliary head that predicts per-step task progress in [0, 1] from the
-    VLM latent (target = the `next.progress` column in the parquet). Useful as a coarse->fine
-    handoff trigger and to make the action head phase-aware near task completion."""
-
-    progress_loss_weight: float = 0.5
-    """Weight on the progress BCE loss when added to the action loss (only used if use_progress_head)."""
-
-    use_progress_conditioning: bool = True
-    """If True, feed progress back as a conditioning token to the action head so it can switch into
-    a finer-motion regime as the task approaches completion. Teacher-forced: training conditions on
-    the ground-truth progress (+ small noise), inference on the head's predicted progress."""
-
     use_tip_target_head: bool = False
     """If True, add an auxiliary head that predicts the target pose in the end-effector (tip) frame
     as xyz(3) + rot6d(6) from the VLM latent (target = the `next.tip_target_9d` column in the
@@ -78,7 +65,20 @@ class FinetuneConfig:
     to the tip."""
 
     tip_target_loss_weight: float = 0.5
-    """Weight on the tip-target MSE loss when added to the action loss (only used if use_tip_target_head)."""
+    """Overall multiplier on the tip-target loss (pos + rot terms) when added to the action loss
+    (only used if use_tip_target_head)."""
+
+    tip_target_pos_loss_weight: float = 1.0
+    """Weight of the position term: squared xyz error normalized by the distance to the target
+    (clamped to tip_target_dist_floor). Relative error, so close-range frames contribute as much
+    gradient as far ones -- plain MSE would spend nearly all gradient on far, coarse frames."""
+
+    tip_target_rot_loss_weight: float = 1.0
+    """Weight of the rotation term: plain MSE on the raw rot6d part of the prediction."""
+
+    tip_target_dist_floor: float = 0.02
+    """Distance floor (metres) for the position-loss normalization. Below this distance the
+    divisor stops shrinking, so the loss does not blow up as the tip reaches the target."""
 
     use_tip_target_conditioning: bool = True
     """If True, feed the tip-target 9d back as a conditioning token to the action head.

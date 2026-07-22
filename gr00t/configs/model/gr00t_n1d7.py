@@ -72,7 +72,7 @@ class Gr00tN1d7Config(PretrainedConfig):
     # Action head configuration parameters
     max_state_dim: int = 132  # Default from state_shape
     max_action_dim: int = 132  # Default from action_shape
-    action_horizon: int = 40
+    action_horizon: int = 30
     hidden_size: int = 1024
     input_embedding_dim: int = 1536
 
@@ -121,43 +121,36 @@ class Gr00tN1d7Config(PretrainedConfig):
     # Multi-embodiment parameters
     max_num_embodiments: int = 32
 
-    # Progress / time-to-completion head parameters.
-    # When enabled, an auxiliary head pools the VLM latent and regresses the
-    # per-step task progress in [0, 1] (the `next.progress` column in the
-    # parquet), supervised with a BCE-with-logits loss. When
-    # `use_progress_conditioning` is on, the progress value is fed back as an
-    # extra conditioning token so the action head can switch into a finer-motion
-    # regime as the task approaches completion. The conditioning is taught by
-    # teacher forcing: training conditions on the *ground-truth* progress (plus a
-    # little noise for robustness), inference conditions on the *predicted*
-    # progress from the head. All default off so existing embodiments /
+    # Tip-target head parameters. All default off so existing embodiments /
     # checkpoints are unaffected; enable via the finetune config / CLI.
-    use_progress_head: bool = False
-    progress_loss_weight: float = 0.5
-    use_progress_conditioning: bool = True
-    progress_conditioning_noise_std: float = 0.05
-    progress_hidden_dim: int = 512
-
-    # Tip-target head parameters (structure mirrors the progress head above).
-    # When enabled, an auxiliary head pools the VLM latent and regresses the
-    # target pose in the end-effector (drill-tip) frame as xyz(3) + rot6d(6)
-    # (the `next.tip_target_9d` column in the parquet). xyz is divided by
-    # `tip_target_xyz_scale` inside the head so the position error (metres) and
-    # the unit-scale rot6d contribute comparable MSE gradients; the distance to
-    # target is derived as ||xyz|| rather than regressed separately. rot6d is
-    # trained with raw MSE and only orthonormalized (Gram-Schmidt) at inference
-    # (Zhou et al., CVPR 2019). Conditioning is taught by teacher forcing
-    # exactly like the progress head: training conditions on the ground-truth
-    # 9d (plus small noise), inference on the head's own prediction. Frames
-    # with NaN labels are excluded from the loss and conditioned on the
-    # (detached) prediction instead.
+    # When enabled, an auxiliary head attention-pools the VLM latent (learned
+    # queries cross-attending over ALL vision-language tokens, so language can
+    # select which target to localize) and regresses the target pose in the
+    # end-effector (drill-tip) frame as xyz(3) + rot6d(6) (the
+    # `next.tip_target_9d` column in the parquet). xyz is divided by
+    # `tip_target_xyz_scale` inside the head; the distance to target is derived
+    # as ||xyz|| rather than regressed separately. The loss has two terms:
+    #   pos: squared error on metric xyz, normalized by the distance to the
+    #        target clamped to `tip_target_dist_floor` -- so a 10% error costs
+    #        the same near and far, instead of far frames dominating.
+    #   rot: plain MSE on raw rot6d, orthonormalized (Gram-Schmidt) only at
+    #        inference (Zhou et al., CVPR 2019).
+    # Conditioning is taught by teacher forcing: training conditions on the
+    # ground-truth 9d (plus small noise), inference on the head's own
+    # prediction. Frames with NaN labels are excluded from
+    # the loss and conditioned on the (detached) prediction instead.
     use_tip_target_head: bool = False
-    tip_target_loss_weight: float = 0.5
+    tip_target_loss_weight: float = 0.5  # overall multiplier vs the action loss
+    tip_target_pos_loss_weight: float = 1.0  # weight of the distance-normalized xyz term
+    tip_target_rot_loss_weight: float = 1.0  # weight of the rot6d MSE term
+    tip_target_dist_floor: float = 0.02  # metres; distance clamp for the pos normalization
     use_tip_target_conditioning: bool = True
     tip_target_xyz_scale: float = 0.1  # metres; xyz is divided by this inside the head
     tip_target_conditioning_noise_xyz: float = 0.005  # metres; teacher-forcing noise std
     tip_target_conditioning_noise_rot: float = 0.02  # rot6d units; teacher-forcing noise std
     tip_target_hidden_dim: int = 512
+    tip_target_num_queries: int = 4  # learned queries for the attention pooling
+    tip_target_attn_heads: int = 8  # heads of the pooling cross-attention
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

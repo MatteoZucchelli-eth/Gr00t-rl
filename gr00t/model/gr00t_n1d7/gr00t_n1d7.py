@@ -35,16 +35,6 @@ from gr00t.model.modules.embodiment_conditioned_mlp import (
 logger = logging.getLogger(__name__)
 
 
-def _masked_mean_pool(
-    vl_embeds: torch.Tensor, attention_mask: torch.Tensor | None = None
-) -> torch.Tensor:
-    """Mean-pool VLM token embeddings over valid (non-padding) tokens, shape (B, D)."""
-    if attention_mask is None:
-        return vl_embeds.mean(dim=1)
-    mask = attention_mask[..., None].to(vl_embeds.dtype)
-    return (vl_embeds * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1e-6)
-
-
 def rot6d_orthonormalize(rot6d: torch.Tensor) -> torch.Tensor:
     """Gram-Schmidt a raw 6D rotation prediction into a valid one (Zhou et al., CVPR 2019).
 
@@ -57,64 +47,21 @@ def rot6d_orthonormalize(rot6d: torch.Tensor) -> torch.Tensor:
     return torch.cat((a, b), dim=-1)
 
 
-class ProgressHead(nn.Module):
-    """Auxiliary head predicting per-step task progress in [0, 1].
-
-    The head mean-pools the (post-vlln) VLM latent over valid tokens and
-    regresses task progress as a raw logit (apply sigmoid for the value). When
-    conditioning is enabled it also embeds the estimate back into a single token
-    that is appended to the state tokens, letting the action DiT switch regimes
-    (e.g. coarse approach vs. fine alignment) based on its own progress estimate
-    -- no ground-truth progress is required at inference time.
-    """
-
-    def __init__(
-        self,
-        latent_dim: int,
-        hidden_dim: int,
-        cond_dim: int,
-        use_conditioning: bool,
-    ):
-        super().__init__()
-        self.predictor = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, 1),
-        )
-        if use_conditioning:
-            self.cond_embed = nn.Sequential(
-                nn.Linear(1, cond_dim),
-                nn.GELU(),
-                nn.Linear(cond_dim, cond_dim),
-            )
-        else:
-            self.cond_embed = None
-
-    def predict_logit(
-        self, vl_embeds: torch.Tensor, attention_mask: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        """Mean-pool valid VLM tokens and return the progress logit, shape (B, 1)."""
-        return self.predictor(_masked_mean_pool(vl_embeds, attention_mask))
-
-    def conditioning_token(self, progress_value: torch.Tensor) -> torch.Tensor:
-        """Embed a progress value in [0, 1] -> a single conditioning token (B, 1, cond_dim)."""
-        assert self.cond_embed is not None
-        return self.cond_embed(progress_value).unsqueeze(1)
-
-
 class TipTargetHead(nn.Module):
     """Auxiliary head predicting the target pose in the end-effector (tip) frame.
 
     Regresses xyz(3) + rot6d(6) -- the `next.tip_target_9d` label -- from the
-    mean-pooled (post-vlln) VLM latent. The head works in a scaled space where
-    xyz is divided by `xyz_scale` so millimetre-level position errors and the
-    unit-scale rot6d receive comparable MSE gradients. When conditioning is
-    enabled, the (scaled) 9d value is embedded into a single token appended to
-    the state tokens, so the action DiT can condition fine motion on where the
-    target is relative to the tip -- teacher-forced on ground truth during
-    training, fed its own prediction at inference.
+    (post-vlln) VLM latent, pooled by a small cross-attention: `num_queries`
+    learned query tokens attend over the full vision-language sequence. Unlike
+    a mean pool, attention preserves *where* the target is (queries can focus
+    on the patch tokens containing it), and it deliberately attends over text
+    tokens too so language can select which target to localize (e.g. "drill
+    the blue square"). The head works in a scaled space where xyz is divided
+    by `xyz_scale`. When conditioning is enabled, the (scaled) 9d value is
+    embedded into a single token appended to the state tokens, so the action
+    DiT can condition fine motion on where the target is relative to the tip
+    -- teacher-forced on ground truth during training, fed its own prediction
+    at inference.
     """
 
     def __init__(
@@ -124,11 +71,16 @@ class TipTargetHead(nn.Module):
         cond_dim: int,
         use_conditioning: bool,
         xyz_scale: float,
+        num_queries: int = 4,
+        num_attn_heads: int = 8,
     ):
         super().__init__()
         self.xyz_scale = xyz_scale
+        self.pool_queries = nn.Parameter(torch.randn(num_queries, latent_dim) * 0.02)
+        self.pool_attn = nn.MultiheadAttention(latent_dim, num_attn_heads, batch_first=True)
+        self.pool_norm = nn.LayerNorm(latent_dim)
         self.predictor = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim),
+            nn.Linear(latent_dim * num_queries, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
@@ -147,7 +99,15 @@ class TipTargetHead(nn.Module):
         self, vl_embeds: torch.Tensor, attention_mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Predict the scaled 9d target (xyz / xyz_scale, raw rot6d), shape (B, 9)."""
-        return self.predictor(_masked_mean_pool(vl_embeds, attention_mask))
+        queries = (
+            self.pool_queries.to(vl_embeds.dtype).unsqueeze(0).expand(vl_embeds.shape[0], -1, -1)
+        )
+        # key_padding_mask: True = ignore that token (padding).
+        key_padding_mask = None if attention_mask is None else ~attention_mask.bool()
+        pooled, _ = self.pool_attn(
+            queries, vl_embeds, vl_embeds, key_padding_mask=key_padding_mask, need_weights=False
+        )
+        return self.predictor(self.pool_norm(pooled).flatten(1))
 
     def scale(self, tip_target_9d: torch.Tensor) -> torch.Tensor:
         """Metric 9d label -> scaled space the head predicts in."""
@@ -228,25 +188,14 @@ class Gr00tN1d7ActionHead(nn.Module):
             self.position_embedding = nn.Embedding(config.max_seq_len, self.input_embedding_dim)
             nn.init.normal_(self.position_embedding.weight, mean=0.0, std=0.02)
 
-        # Optional progress / time-to-completion head (see ProgressHead).
-        self.use_progress_head = getattr(config, "use_progress_head", False)
-        if self.use_progress_head:
-            self.progress_loss_weight = config.progress_loss_weight
-            self.use_progress_conditioning = config.use_progress_conditioning
-            self.progress_conditioning_noise_std = config.progress_conditioning_noise_std
-            self.progress_head = ProgressHead(
-                latent_dim=config.backbone_embedding_dim,
-                hidden_dim=config.progress_hidden_dim,
-                cond_dim=self.input_embedding_dim,
-                use_conditioning=config.use_progress_conditioning,
-            )
-
-        # Optional tip-target head (see TipTargetHead); independent of the
-        # progress head -- both may be enabled, each appending its own
-        # conditioning token (progress first, then tip target).
+        # Optional tip-target head (see TipTargetHead); when enabled it appends
+        # its own conditioning token after the state tokens.
         self.use_tip_target_head = getattr(config, "use_tip_target_head", False)
         if self.use_tip_target_head:
             self.tip_target_loss_weight = config.tip_target_loss_weight
+            self.tip_target_pos_loss_weight = getattr(config, "tip_target_pos_loss_weight", 1.0)
+            self.tip_target_rot_loss_weight = getattr(config, "tip_target_rot_loss_weight", 1.0)
+            self.tip_target_dist_floor = getattr(config, "tip_target_dist_floor", 0.02)
             self.use_tip_target_conditioning = config.use_tip_target_conditioning
             self.tip_target_head = TipTargetHead(
                 latent_dim=config.backbone_embedding_dim,
@@ -254,6 +203,8 @@ class Gr00tN1d7ActionHead(nn.Module):
                 cond_dim=self.input_embedding_dim,
                 use_conditioning=config.use_tip_target_conditioning,
                 xyz_scale=config.tip_target_xyz_scale,
+                num_queries=getattr(config, "tip_target_num_queries", 4),
+                num_attn_heads=getattr(config, "tip_target_attn_heads", 8),
             )
             # Teacher-forcing noise std in the head's scaled space: metric xyz
             # noise is divided by xyz_scale, rot6d noise is used as-is.
@@ -330,12 +281,6 @@ class Gr00tN1d7ActionHead(nn.Module):
         backbone_output["backbone_features"] = backbone_features
         return backbone_output
 
-    def _progress_cond_token(self, progress_value: torch.Tensor) -> torch.Tensor | None:
-        """Build the progress conditioning token from a progress value in [0, 1], shape (B, 1)."""
-        if not self.use_progress_conditioning:
-            return None
-        return self.progress_head.conditioning_token(progress_value)
-
     def _tip_target_cond_token(self, scaled_9d: torch.Tensor) -> torch.Tensor | None:
         """Build the tip-target conditioning token from a scaled 9d value, shape (B, 9)."""
         if not self.use_tip_target_conditioning:
@@ -402,34 +347,10 @@ class Gr00tN1d7ActionHead(nn.Module):
 
         vl_attn_mask = backbone_output.backbone_attention_mask
 
-        # Optional progress head: predict task progress from the VLM latent (for
-        # the auxiliary loss) and condition the action tokens on progress.
-        # Teacher forcing: condition on the ground-truth progress (+ small noise)
-        # so the action head cleanly learns the progress -> action-magnitude
-        # relationship; the predicted progress is used for conditioning only at
-        # inference time. Falls back to the (detached) prediction if no target.
-        progress_logit = None
-        progress_target = action_input.get("progress", None)
-        if self.use_progress_head:
-            progress_logit = self.progress_head.predict_logit(vl_embeds, vl_attn_mask)
-            if progress_target is not None:
-                cond_value = progress_target.to(vl_embeds.dtype).view(-1, 1)
-                if self.training and self.progress_conditioning_noise_std > 0:
-                    cond_value = (
-                        cond_value
-                        + self.progress_conditioning_noise_std * torch.randn_like(cond_value)
-                    )
-                    cond_value = cond_value.clamp(0.0, 1.0)
-            else:
-                cond_value = torch.sigmoid(progress_logit).detach()
-            cond_token = self._progress_cond_token(cond_value)
-            if cond_token is not None:
-                state_features = torch.cat((state_features, cond_token), dim=1)
-
-        # Optional tip-target head: same teacher-forcing scheme as the progress
-        # head, in the head's scaled space. Rows whose label is NaN (unresolved
-        # frames) are conditioned on the detached prediction instead of ground
-        # truth and excluded from the loss below.
+        # Optional tip-target head: teacher-forced conditioning in the head's
+        # scaled space. Rows whose label is NaN (unresolved frames) are
+        # conditioned on the detached prediction instead of ground truth and
+        # excluded from the loss below.
         tip_pred_scaled = None
         tip_target_scaled = None
         tip_valid = None
@@ -487,36 +408,40 @@ class Gr00tN1d7ActionHead(nn.Module):
         outputs = {
             "loss": loss,
             "action_loss": action_loss,
-            # Scalar masked-mean action loss (== total loss before the progress
+            # Scalar masked-mean action loss (== total loss before the tip-target
             # term is added), logged separately so the wandb lines reconcile:
-            # loss == action_loss_scalar + progress_loss_weight * progress_loss.
+            # loss == action_loss_scalar + tip_target_loss_weight * tip_target_loss.
             "action_loss_scalar": loss.detach(),
             "action_mask": action_mask,
             "backbone_features": vl_embeds,
             "state_features": state_features,
         }
 
-        # Progress head: regress task progress with a BCE-with-logits loss on the
-        # soft [0, 1] target, and fold it into the total loss.
-        if self.use_progress_head and progress_logit is not None:
-            outputs["progress_pred"] = torch.sigmoid(progress_logit)
-            if progress_target is not None:
-                progress_target = progress_target.to(progress_logit.dtype).view(-1, 1)
-                progress_loss = F.binary_cross_entropy_with_logits(progress_logit, progress_target)
-                outputs["progress_loss"] = progress_loss
-                outputs["loss"] = loss + self.progress_loss_weight * progress_loss
-
-        # Tip-target head: MSE in the scaled space (xyz / xyz_scale + raw rot6d)
-        # over rows with a resolved label, folded into the total loss.
+        # Tip-target head: two terms over rows with a resolved label.
+        #   pos: squared xyz error in metres, divided by the (clamped) distance to
+        #        the target -- relative error, so close-range frames get as much
+        #        gradient as far ones instead of being drowned out by them.
+        #   rot: plain MSE on the raw rot6d part (unit scale, already accurate).
         if self.use_tip_target_head and tip_pred_scaled is not None:
             outputs["tip_target_pred"] = self.tip_target_head.unscale(
                 tip_pred_scaled, orthonormalize=True
             )
             if tip_target_scaled is not None and tip_valid is not None and tip_valid.any():
                 valid_rows = tip_valid.squeeze(-1)
-                tip_target_loss = F.mse_loss(
-                    tip_pred_scaled[valid_rows], tip_target_scaled[valid_rows]
+                pred_v = tip_pred_scaled[valid_rows]
+                tgt_v = tip_target_scaled[valid_rows]
+                xyz_scale = self.tip_target_head.xyz_scale
+                xyz_residual_m = (pred_v[:, :3] - tgt_v[:, :3]) * xyz_scale
+                dist_m = torch.linalg.vector_norm(tgt_v[:, :3] * xyz_scale, dim=-1, keepdim=True)
+                rel_residual = xyz_residual_m / dist_m.clamp_min(self.tip_target_dist_floor)
+                tip_pos_loss = rel_residual.pow(2).mean()
+                tip_rot_loss = F.mse_loss(pred_v[:, 3:], tgt_v[:, 3:])
+                tip_target_loss = (
+                    self.tip_target_pos_loss_weight * tip_pos_loss
+                    + self.tip_target_rot_loss_weight * tip_rot_loss
                 )
+                outputs["tip_target_pos_loss"] = tip_pos_loss
+                outputs["tip_target_rot_loss"] = tip_rot_loss
                 outputs["tip_target_loss"] = tip_target_loss
                 outputs["loss"] = outputs["loss"] + self.tip_target_loss_weight * tip_target_loss
 
@@ -630,22 +555,10 @@ class Gr00tN1d7ActionHead(nn.Module):
                 :,
             ] = ramp[None, :, None].to(device)
 
-        # Progress head: predict task progress once (independent of the action
-        # noise) and pre-build the conditioned state tokens reused every step.
-        progress_pred = None
-        sa_state_features = state_features
-        if self.use_progress_head:
-            attn_mask = backbone_output.get("backbone_attention_mask", None)
-            progress_logit = self.progress_head.predict_logit(vl_embeds, attn_mask)
-            progress_pred = torch.sigmoid(progress_logit)
-            # At inference we condition on the model's own predicted progress.
-            cond_token = self._progress_cond_token(progress_pred)
-            if cond_token is not None:
-                sa_state_features = torch.cat((sa_state_features, cond_token), dim=1)
-
         # Tip-target head: predict once and condition on the (raw, scaled)
         # prediction, matching the teacher-forced training scheme. Token order
-        # matches training: state, [progress], [tip target].
+        # matches training: state, [tip target].
+        sa_state_features = state_features
         tip_target_pred = None
         if self.use_tip_target_head:
             attn_mask = backbone_output.get("backbone_attention_mask", None)
@@ -701,8 +614,6 @@ class Gr00tN1d7ActionHead(nn.Module):
             "backbone_features": vl_embeds,
             "state_features": state_features,
         }
-        if progress_pred is not None:
-            result["progress_pred"] = progress_pred
         if tip_target_pred is not None:
             result["tip_target_pred"] = tip_target_pred
         return BatchFeature(data=result)

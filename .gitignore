@@ -177,3 +177,6 @@ checkpoints*
 groot-environment.tar.gz
 *.sif
 *.tar.gz
+
+vla_eval_results
+data
