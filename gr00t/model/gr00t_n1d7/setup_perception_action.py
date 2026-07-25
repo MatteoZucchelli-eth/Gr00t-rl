@@ -136,6 +136,37 @@ class Gr00tN1d7PerceptionActionPipeline(Gr00tN1d7PerceptionPipeline):
                     f"replaced (expected: the whole backbone — the perception head only "
                     f"works on the backbone it was trained against)"
                 )
+                # The overlay MUST supply every backbone tensor. If it covers only part
+                # of it, the rest silently stays at the base checkpoint's values and the
+                # perception head ends up reading a backbone it was never trained on —
+                # which destroys its accuracy while still "loading fine". The usual cause
+                # is a select_layer mismatch (a 12-layer perception checkpoint under a
+                # 16-layer config leaves layers 12-15 to the base).
+                backbone_keys = {k for k in model.state_dict() if k.startswith("backbone.")}
+                uncovered = backbone_keys - overlay_keys
+                if uncovered:
+                    raise RuntimeError(
+                        f"Perception checkpoint {perception_ckpt} covers only "
+                        f"{len(backbone_keys) - len(uncovered)}/{len(backbone_keys)} backbone "
+                        f"tensors; {len(uncovered)} would silently come from the base "
+                        f"checkpoint (e.g. {sorted(uncovered)[:3]}).\n"
+                        f"The perception head is only valid on the backbone it was trained "
+                        f"against, so a mixed backbone is never what you want. Most likely "
+                        f"select_layer ({self.config.model.select_layer}) does not match the "
+                        f"perception checkpoint's; set it to that checkpoint's value, or drop "
+                        f"--perception-model-path and train the perception head fresh."
+                    )
+                if not any(k.startswith("perception_head.") for k in overlay_keys):
+                    raise RuntimeError(
+                        f"Perception checkpoint {perception_ckpt} contributed no "
+                        f"perception_head weights. The head would train from scratch while "
+                        f"you believe it is pretrained (and the conditioning noise you "
+                        f"calibrated for it would describe nothing). Check the path, and that "
+                        f"the head-shaping settings match the perception run: "
+                        f"heatmap_hidden_dim={self.config.model.heatmap_hidden_dim}, "
+                        f"depth_loss_weight>0={self.config.model.depth_loss_weight > 0}, "
+                        f"wall_normal_loss_weight>0={self.config.model.wall_normal_loss_weight > 0}."
+                    )
 
             loaded_any = bool(base_ckpt or perception_ckpt)
             if not loaded_any:

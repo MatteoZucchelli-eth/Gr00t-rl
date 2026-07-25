@@ -23,7 +23,7 @@ import os
 import tyro
 
 from gr00t.configs.base_config import get_default_config
-from gr00t.configs.finetune_config import PerceptionActionFinetuneConfig
+from gr00t.configs.finetune_config import GR00T_BASE_MODEL, PerceptionActionFinetuneConfig
 from gr00t.configs.model.gr00t_n1d7_perception_action import Gr00tN1d7PerceptionActionConfig
 from gr00t.experiment.experiment import run
 from gr00t.experiment.launch_finetune import load_modality_config
@@ -63,6 +63,7 @@ if __name__ == "__main__":
     model.tune_llm = ft_config.tune_llm
     model.tune_visual = ft_config.tune_visual
     model.tune_top_llm_layers = ft_config.tune_top_llm_layers
+    model.select_layer = ft_config.select_layer
     model.tune_projector = ft_config.tune_projector
     model.tune_diffusion_model = ft_config.tune_diffusion_model
     model.tune_vlln = True
@@ -115,7 +116,8 @@ if __name__ == "__main__":
     model.perception_cond_vis_dropout_prob = ft_config.perception_cond_vis_dropout_prob
 
     config.training.experiment_name = ft_config.experiment_name
-    config.training.start_from_checkpoint = ft_config.base_model_path
+    # The base is always the GR00T foundation checkpoint; see GR00T_BASE_MODEL.
+    config.training.start_from_checkpoint = GR00T_BASE_MODEL
     config.training.perception_start_from_checkpoint = ft_config.perception_model_path
     config.training.optim = "adamw_torch"
     config.training.global_batch_size = ft_config.global_batch_size

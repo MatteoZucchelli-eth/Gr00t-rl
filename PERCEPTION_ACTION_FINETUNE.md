@@ -144,37 +144,67 @@ perception checkpoint fixes it, set the term to 0.
 not visible" on a fraction of steps where it actually is, so it learns to hold or search
 rather than collapse when perception drops out mid-approach.
 
-## Weight initialization: two overlays
+## Weight initialization
 
-The good init lives in two different checkpoints, so the launcher takes both:
+**The base is always `nvidia/GR00T-N1.7-3B`.** There is no flag for it, by design: the
+model config is pinned to that checkpoint's architecture (32 DiT blocks, 4 VL
+self-attention layers, 16 LLM layers) so the whole pretrained action stack — **537/537
+tensors** — lands. Any other base would load partially and silently.
 
-| Flag | Supplies | Notes |
+That pinning is load-bearing. On the normal VLA path `Gr00tN1d7Pipeline` calls
+`AutoModel.from_pretrained`, which takes the architecture from the *checkpoint's*
+`config.json`; the dataclass defaults in `Gr00tN1d7Config` (16 DiT blocks, no VL
+self-attention, `select_layer=12`) are dead code there and have never described a real
+run. This pipeline builds from the dataclass instead — the checkpoint describes a
+different model — so those defaults become live. Left inherited they would have quietly
+produced a half-size denoiser with no VL self-attention.
+
+### The optional perception overlay, and what it costs
+
+`--perception-model-path` overlays a trained perception head **and the backbone it was
+trained against**, which overrides the base backbone (the head's features are only
+meaningful on it). It buys a head that already localizes to 0.85 px.
+
+It is not free. `checkpoints-perceptionv1` was trained at `select_layer=12` — itself a
+consequence of the same stale-default trap — so reusing it means:
+
+| | pure GR00T (default) | with the perceptionv1 overlay |
 |---|---|---|
-| `--base-model-path` | `action_head.*` (+ backbone if nothing better) | one of your VLA runs, or `nvidia/GR00T-N1.7-3B`. A fresh DiT costs thousands of steps. |
-| `--perception-model-path` | `perception_head.*` **and** `backbone.*` | one of your perception runs. Its backbone **overrides** the base one on purpose: the perception head's features are only meaningful on the backbone it was trained against. |
+| LLM layers | 16 (all of them) | 12 — top 4 discarded |
+| action stack | pretrained on the features it now sees | pretrained on 16-layer features, fed 12-layer |
+| perception head | trains from scratch | starts at 0.85 px |
+| conditioning calibration | must be re-measured | the shipped defaults apply |
 
-Omitting the perception overlay means a fresh perception head — relearning localization
-from scratch alongside the actions. Strongly recommended to pass it.
+**Default recommendation: start clean, no overlay.** Teacher forcing is what makes this
+safe — during training token A comes from the *label*, not the head, so a weak early
+perception head does not hold back action learning. Only inference quality depends on the
+head, and it gets the same losses on the same data as the perception run did, on a
+strictly better backbone. Reusing perceptionv1 locks the whole model to a truncated trunk
+to save a head that will retrain anyway.
+
+If you do overlay it, pass `SELECT_LAYER=12`. The pipeline **hard-fails** rather than
+assembling a mixed backbone, and also fails if the overlay contributes zero
+`perception_head` tensors — so a silent partial load is not a failure mode you can hit.
+Re-run `scripts/calibrate_perception_conditioning.py` afterwards either way: the shipped
+noise and the +6.5 mm bias describe perceptionv1 specifically, and injecting that bias
+into a head that does not have it would be actively harmful.
 
 ## Training
 
 ```bash
-# Cluster (Euler):
-RUN_NAME=perception_action_v1 \
-  BASE_MODEL_PATH=/groot/runs/red_and_green/checkpoint-10000 \
-  PERCEPTION_MODEL_PATH=/groot/runs/perception_v1/checkpoint-10000 \
-  COND_NOISE_UV_PX=<measured px error> \
+# Cluster (Euler) — the recommended run:
+RUN_NAME=perception_action_v1 sbatch submit_perception_action_euler.sh
+
+# Reusing an existing perception head instead (needs ITS select_layer):
+RUN_NAME=perception_action_reuse \
+  PERCEPTION_MODEL_PATH=/groot/runs/perceptionv1 SELECT_LAYER=12 \
   sbatch submit_perception_action_euler.sh
 
 # Locally / inside the container:
-RUN_NAME=perception_action_v1 \
-  BASE_MODEL_PATH=... PERCEPTION_MODEL_PATH=... \
-  bash start_finetune_perception_action.sh
+RUN_NAME=perception_action_v1 bash start_finetune_perception_action.sh
 
 # Or directly:
 python gr00t/experiment/launch_finetune_perception_action.py \
-    --base-model-path <vla-checkpoint> \
-    --perception-model-path <perception-checkpoint> \
     --dataset-path ./g1_dataset --embodiment-tag NEW_EMBODIMENT \
     --modality-config-path register_perception_action_modality.py \
     --output-dir <dir> --tune-visual \

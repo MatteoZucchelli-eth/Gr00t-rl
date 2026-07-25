@@ -17,6 +17,11 @@
 from dataclasses import dataclass
 
 
+GR00T_BASE_MODEL = "nvidia/GR00T-N1.7-3B"
+"""The one checkpoint the perception-action model ever starts from. Its architecture is
+pinned in Gr00tN1d7PerceptionActionConfig, so this is not a user choice."""
+
+
 @dataclass
 class FinetuneConfig:
     """
@@ -216,22 +221,11 @@ class FinetuneConfig:
 
 
 @dataclass
-class PerceptionFinetuneConfig:
-    """Configuration for fine-tuning the perception-only model (VLM backbone +
-    target heatmap head) used in the short-range fine approach.
-
-    The model sees ONLY the current wrist-camera frame + instruction and predicts
-    the wall-target location as a heatmap in wrist-camera pixels, a visibility
-    flag, and optionally target depth / wall normal. Training samples only the
-    labelled fine-phase frames (heatmap_labels/ sidecar next to data/).
-    """
-
-    # --- Data and Model Paths ---
-    base_model_path: str | None = None
-    """Checkpoint to initialize the VLM backbone from. Accepts a full VLA checkpoint
-    (e.g. one of your finetuned GR00T runs — action-head weights are ignored) or a
-    previous perception checkpoint. If None, starts from the raw Cosmos-Reason2-2B
-    backbone weights."""
+class _PerceptionCommonConfig:
+    """Settings shared by the perception-only and perception-conditioned-action
+    finetunes. Split out so the action variant can omit `base_model_path`: that model
+    always starts from GR00T_BASE_MODEL and exposing a choice there would let a
+    mismatched architecture load silently."""
 
     dataset_path: str = "./g1_dataset"
     """Path to the dataset root (must contain the heatmap_labels/ sidecar directory)."""
@@ -316,7 +310,24 @@ class PerceptionFinetuneConfig:
 
 
 @dataclass
-class PerceptionActionFinetuneConfig(PerceptionFinetuneConfig):
+class PerceptionFinetuneConfig(_PerceptionCommonConfig):
+    """Fine-tune the perception-only model (VLM backbone + target heatmap head).
+
+    The model sees ONLY the current wrist-camera frame + instruction and predicts the
+    wall-target location as a heatmap in wrist-camera pixels, a visibility flag, and
+    optionally target depth / wall normal. Training samples only the labelled fine-phase
+    frames (heatmap_labels/ sidecar next to data/).
+    """
+
+    base_model_path: str | None = None
+    """Checkpoint to initialize the VLM backbone from. Accepts a full VLA checkpoint
+    (e.g. one of your finetuned GR00T runs — action-head weights are ignored) or a
+    previous perception checkpoint. If None, starts from the raw Cosmos-Reason2-2B
+    backbone weights."""
+
+
+@dataclass
+class PerceptionActionFinetuneConfig(_PerceptionCommonConfig):
     """Configuration for the perception-CONDITIONED action model (fine approach).
 
     Same wrist-only inputs and heatmap supervision as PerceptionFinetuneConfig, plus
@@ -325,17 +336,27 @@ class PerceptionActionFinetuneConfig(PerceptionFinetuneConfig):
     (see Gr00tN1d7PerceptionActionConfig for the token layout).
     """
 
-    # --- Weight initialization (two overlays; see Gr00tN1d7PerceptionActionPipeline) ---
-    base_model_path: str | None = "nvidia/GR00T-N1.7-3B"
-    """Base checkpoint: a full VLA run of yours or nvidia/GR00T-N1.7-3B. Supplies the
-    ACTION HEAD (a trained DiT saves thousands of steps) and the backbone if no
-    perception checkpoint is given."""
+    # --- Weight initialization (see Gr00tN1d7PerceptionActionPipeline) ---
+    # The base is ALWAYS nvidia/GR00T-N1.7-3B — there is no flag for it. The model
+    # config is pinned to that checkpoint's architecture (32 DiT blocks, 4 VL
+    # self-attention layers, 16 LLM layers), so any other base would load partially
+    # and silently. GR00T_BASE_MODEL below is the single source of truth.
 
     perception_model_path: str | None = None
-    """Optional perception checkpoint overlaid on top of base_model_path. Supplies the
-    trained perception head AND the backbone it was trained against (which deliberately
-    overrides the base backbone — the head's features are only meaningful on it).
-    Strongly recommended: it is the whole point of having trained the perception model."""
+    """OPTIONAL perception checkpoint overlaid on top of the GR00T base. Supplies the
+    trained perception head AND the backbone it was trained against, which overrides the
+    base backbone — the head's features are only meaningful on that backbone.
+
+    Not free: the existing perceptionv1 checkpoint was trained at select_layer=12, so
+    using it forces --select-layer 12 and gives up the foundation's top 4 LLM layers plus
+    the match between GR00T's pretrained action stack and the features it now sees. Left
+    unset, the perception head trains from scratch on a fully coherent GR00T init — which
+    teacher forcing makes safe, since the conditioning token comes from the LABEL during
+    training and only inference quality depends on the head."""
+
+    select_layer: int = 16
+    """LLM layers kept in the backbone. 16 = the foundation's own value. Set to 12 only to
+    match a perceptionv1-style overlay (the pipeline hard-fails on a mismatch)."""
 
     # --- Action head ---
     tune_projector: bool = True

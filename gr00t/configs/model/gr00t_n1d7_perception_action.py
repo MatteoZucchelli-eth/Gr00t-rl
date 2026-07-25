@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import register_model_config
 from .gr00t_n1d7_perception import Gr00tN1d7PerceptionConfig
@@ -53,6 +53,57 @@ class Gr00tN1d7PerceptionActionConfig(Gr00tN1d7PerceptionConfig):
 
     # Model identification (overrides Gr00tN1d7Perception)
     model_type: str = "Gr00tN1d7PerceptionAction"
+
+    # --- Architecture: must match the checkpoints we initialize from ---
+    diffusion_model_cfg: dict = field(
+        default_factory=lambda: {
+            "positional_embeddings": None,
+            "num_layers": 32,
+            "num_attention_heads": 32,
+            "attention_head_dim": 48,
+            "norm_type": "ada_norm",
+            "dropout": 0.2,
+            "final_dropout": True,
+            "output_dim": 1024,
+            "interleave_self_attention": True,
+        }
+    )
+    """DiT geometry, pinned to nvidia/GR00T-N1.7-3B's own config (32 blocks).
+
+    DO NOT fall back to the Gr00tN1d7Config default of 16 here. That default is dead
+    code on the VLA path — Gr00tN1d7Pipeline calls AutoModel.from_pretrained, which
+    takes the architecture from the CHECKPOINT's config.json (32 blocks), so no real
+    run has ever used 16. This pipeline builds the model from this dataclass instead
+    (the checkpoint describes a different model), so the value here is live: at 16 it
+    would silently construct a half-size denoiser and inherit only blocks 0-15 of the
+    pretrained DiT."""
+
+    vl_self_attention_cfg: dict = field(
+        default_factory=lambda: {
+            "positional_embeddings": None,
+            "num_layers": 4,
+            "num_attention_heads": 32,
+            "attention_head_dim": 64,
+            "dropout": 0.2,
+            "final_dropout": True,
+        }
+    )
+    """The 4-layer self-attention stack the action head runs over the VL features before
+    the DiT. Also pinned to the foundation's config — Gr00tN1d7Config does not declare
+    this field at all, so leaving it out means nn.Identity() and 64 pretrained tensors
+    silently dropped on the floor."""
+
+    select_layer: int = 16
+    """Number of LLM layers kept in the backbone. 16 = the foundation's own value, i.e.
+    the whole Cosmos-Reason2-2B trunk that GR00T-N1.7-3B's action head was trained
+    against.
+
+    Lower it ONLY to match a perception checkpoint you are overlaying. The existing
+    perceptionv1 checkpoint was trained at 12 (the stale dataclass default), so reusing
+    it requires --select-layer 12 and costs you the top 4 LLM layers plus the alignment
+    between the pretrained action stack and the features it sees.
+    Gr00tN1d7PerceptionActionPipeline hard-fails rather than assembling a mixed backbone,
+    so a mismatch is loud, not silent."""
 
     # --- Perception loss vs action loss ---
     perception_loss_weight: float = 1.0

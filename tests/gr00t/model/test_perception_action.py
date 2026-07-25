@@ -448,6 +448,9 @@ def _perception_action_config(**overrides) -> Gr00tN1d7PerceptionActionConfig:
         use_alternate_vl_dit=False,
         select_layer=1,
         use_flash_attention=False,
+        # The real config pins a 4-layer VL self-attention sized for the 2048-d
+        # backbone; at these toy dimensions it must be off.
+        vl_self_attention_cfg={"num_layers": 0},
         image_target_size=(IMG_SIZE, IMG_SIZE),
         image_crop_size=(IMG_SIZE - 8, IMG_SIZE - 8),
         heatmap_hidden_dim=16,

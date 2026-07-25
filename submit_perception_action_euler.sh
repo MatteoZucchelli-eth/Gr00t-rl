@@ -16,11 +16,11 @@
 # Usage:
 #   cd ~/groot && sbatch submit_perception_action_euler.sh
 #
-#   # Recommended: init the action head from one of your VLA runs and the
-#   # perception head (+ its backbone) from your perception run:
-#   RUN_NAME=perception_action_v1 \
-#       BASE_MODEL_PATH=/groot/runs/red_and_green/checkpoint-10000 \
-#       PERCEPTION_MODEL_PATH=/groot/runs/perception_v1/checkpoint-10000 \
+#   RUN_NAME=perception_action_v1 sbatch submit_perception_action_euler.sh
+#
+#   # Optional: reuse an existing perception head (needs its select_layer):
+#   RUN_NAME=perception_action_reuse \
+#       PERCEPTION_MODEL_PATH=/groot/runs/perceptionv1 SELECT_LAYER=12 \
 #       COND_NOISE_UV_PX=<from calibrate_perception_conditioning.py> \
 #       sbatch submit_perception_action_euler.sh
 #
@@ -39,10 +39,9 @@
 #        start_finetune_perception_action.sh, setup_and_train_perception_action.sh,
 #        register_perception_action_modality.py, gr00t/
 #
-#   3. BASE_MODEL_PATH and PERCEPTION_MODEL_PATH must be reachable INSIDE the
-#      container. Scratch is mounted as /groot, so runs live at
-#      /groot/runs/<run_name>/checkpoint-XXXX. An HF id like nvidia/GR00T-N1.7-3B
-#      also works (downloads via HF_TOKEN from .env).
+#   3. PERCEPTION_MODEL_PATH (if used) must be reachable INSIDE the container.
+#      Scratch is mounted as /groot, so runs live at /groot/runs/<run>/checkpoint-XXXX.
+#      The GR00T base downloads via HF_TOKEN from .env.
 #
 #   4. COND_NOISE_UV_PX defaults to 3.0 px, MEASURED from the
 #      1500_perception_planner eval of the 1500-step perception checkpoint. If you
@@ -65,8 +64,8 @@ GROOT_DIR="/cluster/scratch/$USER/groot"
 RESULTS_DIR="/cluster/project/mrl/$USER/results/groot/$SLURM_JOB_ID"
 DATASET_HOST_DIR="${DATASET_HOST_DIR:-/cluster/work/mrl/$USER/datasets/g1_dataset_perception}"
 
-# Weight init (paths as seen INSIDE the container).
-BASE_MODEL_PATH="${BASE_MODEL_PATH:-nvidia/GR00T-N1.7-3B}"
+# Weight init: base is always nvidia/GR00T-N1.7-3B. Optional perception overlay
+# (path as seen INSIDE the container).
 PERCEPTION_MODEL_PATH="${PERCEPTION_MODEL_PATH:-}"
 
 # --- Job info ---
@@ -77,7 +76,8 @@ echo "Date:                  $(date)"
 echo "GPU:                   $CUDA_VISIBLE_DEVICES"
 echo "TMPDIR:                $TMPDIR"
 echo "RUN_NAME:              ${RUN_NAME:-perception_action_v1}"
-echo "BASE_MODEL_PATH:       $BASE_MODEL_PATH        (action head)"
+echo "BASE_MODEL_PATH:       nvidia/GR00T-N1.7-3B (fixed)"
+echo "SELECT_LAYER:          ${SELECT_LAYER:-16}"
 echo "PERCEPTION_MODEL_PATH: ${PERCEPTION_MODEL_PATH:-<none: fresh perception head>}"
 echo "COND_NOISE_UV_PX:      ${COND_NOISE_UV_PX:-3.0 (measured, 1500 perception ckpt)}"
 echo "COND_BIAS_DEPTH_M:     ${COND_BIAS_DEPTH_M:-0.0065 (systematic depth offset)}"
@@ -142,8 +142,8 @@ time apptainer exec --nv \
     --env TORCH_EXTENSIONS_DIR=/groot/cache/torch_kernels \
     --env XDG_CACHE_HOME=/groot/cache \
     --env RUN_NAME="${RUN_NAME:-perception_action_v1}" \
-    --env BASE_MODEL_PATH="$BASE_MODEL_PATH" \
     --env PERCEPTION_MODEL_PATH="$PERCEPTION_MODEL_PATH" \
+    --env SELECT_LAYER="${SELECT_LAYER:-}" \
     --env HEATMAP_SIGMA_PX="${HEATMAP_SIGMA_PX:-}" \
     --env HEATMAP_LOSS_WEIGHT="${HEATMAP_LOSS_WEIGHT:-}" \
     --env OFFSET_LOSS_WEIGHT="${OFFSET_LOSS_WEIGHT:-}" \
