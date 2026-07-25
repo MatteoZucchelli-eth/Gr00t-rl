@@ -188,3 +188,10 @@ everything on `visibility` (e.g. hold the last confident estimate when it drops 
 - `heatmap_target_sigma_px` trades sharpness vs training stability; if `uv_err_px_metric`
   plateaus high, try 5–6 px. The subpixel offset head is what carries precision below
   one 32 px cell.
+
+## Generating actions from this perception
+
+A checkpoint from this run is the recommended `--perception-model-path` init for the
+**perception-conditioned action model**, which keeps this head and adds an action head
+whose DiT is conditioned on the perception output cast into tokens. See
+[PERCEPTION_ACTION_FINETUNE.md](PERCEPTION_ACTION_FINETUNE.md).

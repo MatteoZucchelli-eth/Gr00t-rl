@@ -313,3 +313,108 @@ class PerceptionFinetuneConfig:
     save_only_model: bool = False
     skip_weight_loading: bool = False
     """If True, skip loading weights from base_model_path (smoke tests)."""
+
+
+@dataclass
+class PerceptionActionFinetuneConfig(PerceptionFinetuneConfig):
+    """Configuration for the perception-CONDITIONED action model (fine approach).
+
+    Same wrist-only inputs and heatmap supervision as PerceptionFinetuneConfig, plus
+    the flow-matching action head. The perception output is cast into conditioning
+    tokens the DiT attends to, so the action chunk depends on where the target is
+    (see Gr00tN1d7PerceptionActionConfig for the token layout).
+    """
+
+    # --- Weight initialization (two overlays; see Gr00tN1d7PerceptionActionPipeline) ---
+    base_model_path: str | None = "nvidia/GR00T-N1.7-3B"
+    """Base checkpoint: a full VLA run of yours or nvidia/GR00T-N1.7-3B. Supplies the
+    ACTION HEAD (a trained DiT saves thousands of steps) and the backbone if no
+    perception checkpoint is given."""
+
+    perception_model_path: str | None = None
+    """Optional perception checkpoint overlaid on top of base_model_path. Supplies the
+    trained perception head AND the backbone it was trained against (which deliberately
+    overrides the base backbone — the head's features are only meaningful on it).
+    Strongly recommended: it is the whole point of having trained the perception model."""
+
+    # --- Action head ---
+    tune_projector: bool = True
+    """If True, fine-tune the state/action encoders and decoder."""
+
+    tune_diffusion_model: bool = True
+    """If True, fine-tune the DiT."""
+
+    state_dropout_prob: float = 0.2
+    """Dropout applied to state inputs in the processor, for regularization."""
+
+    # --- Perception loss vs action loss ---
+    perception_loss_weight: float = 1.0
+    """Multiplier on the whole perception loss when added to the action loss. Keep it at
+    1.0 unless the perception metrics degrade once the action loss is in play; 0 trains
+    the action head against a frozen-quality perception signal."""
+
+    # --- Conditioning tokens ---
+    use_perception_conditioning: bool = True
+    """Master switch for the conditioning tokens. If False the perception head is still
+    trained as an auxiliary task but the action head cannot see it (useful as the ablation
+    baseline that shows the conditioning is what helps)."""
+
+    use_perception_geometry_token: bool = True
+    """Emit the "where" token (Fourier-encoded uv + visibility + confidence + depth/normal)."""
+
+    use_perception_appearance_token: bool = True
+    """Emit the "what" token (heatmap-weighted pooled image feature)."""
+
+    perception_num_fourier_bands: int = 8
+    """Octaves in the (u, v) positional encoding. 8 resolves ~1 px at 720; raising it
+    costs nothing but can make the token noisier."""
+
+    perception_appearance_temperature: float = 1.0
+    """Softmax temperature of the heatmap used to pool the appearance token."""
+
+    perception_appearance_stopgrad: bool = False
+    """Cut the gradient from the action loss into the heatmap (through the appearance
+    token). Turn on only if uv_err_px_metric degrades once actions are trained."""
+
+    # --- Teacher forcing / exposure bias ---
+    perception_cond_teacher_forcing: bool = True
+    """Condition on the label (+ noise below) where one exists, on the head's own
+    prediction elsewhere. Matches the tip-target scheme."""
+
+    perception_cond_noise_uv_px: float = 3.0
+    """Std (processed-image px) of the noise added to the teacher-forced (u, v).
+
+    Measured via `scripts/calibrate_perception_conditioning.py` on the
+    1500_perception_planner eval: 0.85 processed px rms for a single frame, inflated 3x
+    because that eval only runs perception with a PARKED camera out to 67 mm while this
+    model runs it every frame, moving, out to 150 mm. RE-RUN the script for every new
+    perception checkpoint. Noise smaller than the real deployment error teaches the
+    policy to trust perfect perception and it will be brittle on the robot. 1 processed
+    px is 0.28-0.46 mm at the working depth (f = 388 px at the raw 720 camera, recovered
+    from the dataset)."""
+
+    perception_cond_noise_depth_m: float = 0.004
+    """Std (metres) of the RANDOM part of the depth error (measured single-frame spread
+    4.32 mm). The systematic part is perception_cond_bias_depth_m."""
+
+    perception_cond_bias_depth_m: float = 0.0065
+    """Systematic depth offset (metres) added to the teacher-forced depth. Measured
+    +6.49 mm, which is 84% of the mean-square depth error — the depth output is
+    consistently long and accumulating detections does not fix it. Applied in eval mode
+    too. Set to 0 if a newer perception checkpoint removes the offset."""
+
+    perception_cond_noise_normal: float = 0.04
+    """Std of the noise on the teacher-forced wall normal. From the same eval's rotation
+    spread (3.49 deg -> 0.043 per component); the least reliable of the four."""
+
+    perception_cond_vis_dropout_prob: float = 0.1
+    """Probability of telling the policy "target not visible" even when the label says it
+    is, so it learns to hold/search instead of collapsing when perception drops out."""
+
+    # --- Overrides of the perception defaults ---
+    action_horizon: int = 30
+    """Number of future steps predicted per chunk. MUST equal the length of the action
+    delta_indices in the modality config (see register_perception_action_modality.py)."""
+
+    output_dir: str = "./outputs-perception-action"
+    wandb_project: str = "finetune-gr00t-n1d7-perception-action"

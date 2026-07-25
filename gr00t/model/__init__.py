@@ -15,4 +15,5 @@
 
 from .gr00t_n1d7.setup import Gr00tN1d7Pipeline
 from .gr00t_n1d7.setup_perception import Gr00tN1d7PerceptionPipeline
+from .gr00t_n1d7.setup_perception_action import Gr00tN1d7PerceptionActionPipeline
 from .registry import MODEL_REGISTRY

@@ -47,6 +47,13 @@ class TrainingConfig:
     start_from_checkpoint: Optional[str] = None
     skip_weight_loading: bool = False  # skip loading checkpoint weights (architecture only)
 
+    # Second, OPTIONAL checkpoint overlaid on top of start_from_checkpoint, used by the
+    # perception-conditioned action model: start_from_checkpoint supplies the action head
+    # (a VLA run) while this supplies the trained perception head TOGETHER WITH the
+    # backbone it was trained against — the perception head is meaningless on a backbone
+    # whose features it never saw, so this overlay deliberately wins on `backbone.*`.
+    perception_start_from_checkpoint: Optional[str] = None
+
     # Mixed precision
     tf32: bool = True
     fp16: bool = False

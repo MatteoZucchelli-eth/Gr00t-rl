@@ -336,7 +336,12 @@ class Gr00tN1d7ActionHead(nn.Module):
             return None
         return self.tip_target_head.conditioning_token(scaled_9d)
 
-    def forward(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
+    def forward(
+        self,
+        backbone_output: BatchFeature,
+        action_input: BatchFeature,
+        extra_cond_tokens: torch.Tensor | None = None,
+    ) -> BatchFeature:
         """
         Forward pass through the action head.
 
@@ -349,6 +354,11 @@ class Gr00tN1d7ActionHead(nn.Module):
                 - action: [B, action_horizon, action_dim] (during training)
                 - embodiment_id: [B] (embodiment IDs)
                 - action_mask: [B, action_horizon, action_dim]
+            extra_cond_tokens: optional [B, K, input_embedding_dim] conditioning
+                tokens appended after the state (and tip-target) tokens, so the
+                DiT's self-attention stream sees them alongside state and action.
+                Used by Gr00tN1d7PerceptionAction to inject the perception
+                geometry/appearance tokens.
 
         Returns:
             BatchFeature containing:
@@ -421,6 +431,11 @@ class Gr00tN1d7ActionHead(nn.Module):
             tip_cond_token = self._tip_target_cond_token(tip_cond_value)
             if tip_cond_token is not None:
                 state_features = torch.cat((state_features, tip_cond_token), dim=1)
+
+        if extra_cond_tokens is not None:
+            state_features = torch.cat(
+                (state_features, extra_cond_tokens.to(state_features.dtype)), dim=1
+            )
 
         # Join vision, language, state and action embedding along sequence dimension.
         sa_embs = torch.cat((state_features, action_features), dim=1)
@@ -551,6 +566,7 @@ class Gr00tN1d7ActionHead(nn.Module):
         backbone_output: BatchFeature,
         action_input: BatchFeature,
         options: dict[str, Any] | None = None,
+        extra_cond_tokens: torch.Tensor | None = None,
     ) -> BatchFeature:
         """
         Generate actions using the flow matching diffusion process.
@@ -560,6 +576,9 @@ class Gr00tN1d7ActionHead(nn.Module):
             state_features: [B, state_horizon, input_embedding_dim]
             embodiment_id: [B] (embodiment IDs)
             backbone_output: Output from the backbone model
+            extra_cond_tokens: optional [B, K, input_embedding_dim] conditioning
+                tokens appended after the state (and tip-target) tokens. Token
+                order must match training exactly.
         """
         vl_embeds = backbone_features
 
@@ -626,6 +645,11 @@ class Gr00tN1d7ActionHead(nn.Module):
             if tip_cond_token is not None:
                 sa_state_features = torch.cat((sa_state_features, tip_cond_token), dim=1)
 
+        if extra_cond_tokens is not None:
+            sa_state_features = torch.cat(
+                (sa_state_features, extra_cond_tokens.to(sa_state_features.dtype)), dim=1
+            )
+
         # Run denoising steps.
         for t in range(self.num_inference_timesteps):
             t_cont = t / float(self.num_inference_timesteps)  # e.g. goes 0, 1/N, 2/N, ...
@@ -682,6 +706,7 @@ class Gr00tN1d7ActionHead(nn.Module):
         backbone_output: BatchFeature,
         action_input: BatchFeature,
         options: dict[str, Any] | None = None,
+        extra_cond_tokens: torch.Tensor | None = None,
     ) -> BatchFeature:
         """
         Generate actions using the flow matching diffusion process.
@@ -693,6 +718,8 @@ class Gr00tN1d7ActionHead(nn.Module):
             action_input: Input containing:
                 - state: [B, state_dim]
                 - embodiment_id: [B] (embodiment IDs)
+            extra_cond_tokens: optional [B, K, input_embedding_dim] conditioning
+                tokens (see get_action_with_features).
 
         Returns:
             BatchFeature containing:
@@ -705,6 +732,7 @@ class Gr00tN1d7ActionHead(nn.Module):
             embodiment_id=action_input.embodiment_id,
             backbone_output=backbone_output,
             action_input=action_input,
+            extra_cond_tokens=extra_cond_tokens,
             options=options,
         )
 

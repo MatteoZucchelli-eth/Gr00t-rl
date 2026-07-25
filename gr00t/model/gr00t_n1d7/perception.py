@@ -122,6 +122,174 @@ class TargetPerceptionHead(nn.Module):
         return out
 
 
+def processed_image_size(image_target_size) -> Tuple[float, float]:
+    """(W, H) of the processor's output image — the frame target_uv lives in."""
+    if isinstance(image_target_size, (tuple, list)):
+        return float(image_target_size[1]), float(image_target_size[0])  # stored as (H, W)
+    return float(image_target_size), float(image_target_size)
+
+
+def image_token_grid(
+    vl_embeds: torch.Tensor,
+    image_mask: torch.Tensor,
+    image_grid_thw: torch.Tensor,
+    merge_size: int,
+) -> Tuple[torch.Tensor, int, int]:
+    """Gather image-token features into (B, gh*gw, D) plus the grid shape.
+
+    Requires exactly one image per sample with identical grid shape across the
+    batch (the perception setup: single current wrist frame at a fixed
+    resolution).
+    """
+    B = vl_embeds.shape[0]
+    assert image_grid_thw.shape[0] == B, (
+        f"Perception head expects exactly 1 image per sample, got "
+        f"{image_grid_thw.shape[0]} images for batch of {B}. Use a wrist-only "
+        f"modality config with video delta_indices=[0]."
+    )
+    t, h, w = (int(x) for x in image_grid_thw[0])
+    gh, gw = (h // merge_size), (w // merge_size)
+    n_tokens = t * gh * gw
+    counts = image_mask.sum(dim=1)
+    assert bool((counts == n_tokens).all()), (
+        f"Image token count mismatch: expected {n_tokens}, got {counts.tolist()}"
+    )
+    image_tokens = vl_embeds[image_mask].view(B, n_tokens, -1)
+    return image_tokens, gh, gw
+
+
+def decode_uv(
+    heat_logits: torch.Tensor,
+    offsets: torch.Tensor,
+    gh: int,
+    gw: int,
+    proc_w: float,
+    proc_h: float,
+) -> torch.Tensor:
+    """Argmax cell + its subpixel offset -> uv in processed-image px, (B, 2)."""
+    B = heat_logits.shape[0]
+    best = heat_logits.argmax(dim=-1)  # (B,)
+    off = offsets[torch.arange(B, device=heat_logits.device), best].clamp(-0.5, 0.5)
+    cx = (best % gw).float() + 0.5 + off[:, 0]
+    cy = (best // gw).float() + 0.5 + off[:, 1]
+    return torch.stack((cx / gw * proc_w, cy / gh * proc_h), dim=-1)
+
+
+def perception_losses(
+    config: Gr00tN1d7PerceptionConfig,
+    head_out: dict[str, torch.Tensor],
+    inputs: dict,
+    gh: int,
+    gw: int,
+    use_depth: bool,
+    use_normal: bool,
+    pred_uv: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor]:
+    """All perception losses + monitoring metrics for one batch.
+
+    Shared by the perception-only model (where the weighted sum IS the training
+    loss) and the perception-action model (where it is added to the action loss).
+    Returns the individual terms, the weighted sum as ``perception_loss``, and
+    the no-grad quality metrics ``uv_err_px_metric`` / ``visibility_acc_metric``.
+
+    All masked terms are computed batch-wide and mask-weighted rather than by
+    indexing valid rows, so every head parameter receives a gradient on every
+    step and DDP never sees an unused parameter.
+    """
+    heat_logits = head_out["heat_logits"].float()  # (B, N)
+    offsets = head_out["offsets"].float()  # (B, N, 2)
+    vis_logit = head_out["vis_logit"].float()  # (B,)
+    B, N = heat_logits.shape
+    device = heat_logits.device
+
+    proc_w, proc_h = processed_image_size(config.image_target_size)
+
+    # Labels (from the perception processor): uv in processed-image px.
+    target_uv = inputs["target_uv"].float().view(B, 2)
+    target_visible = inputs["target_visible"].float().view(B)
+    heat_valid = target_visible * (~torch.isnan(target_uv).any(dim=-1)).float()
+
+    # Normalized target coords in [0,1] (NaN-safe; invalid rows are masked out).
+    uv = torch.nan_to_num(target_uv)
+    u_norm = (uv[:, 0] / proc_w).clamp(0.0, 1.0 - 1e-6)
+    v_norm = (uv[:, 1] / proc_h).clamp(0.0, 1.0 - 1e-6)
+    gx = u_norm * gw  # continuous grid coords, cell units
+    gy = v_norm * gh
+
+    # --- Heatmap CE against a normalized Gaussian rendered on the cell grid ---
+    sigma_x = config.heatmap_target_sigma_px / proc_w * gw
+    sigma_y = config.heatmap_target_sigma_px / proc_h * gh
+    xs = torch.arange(gw, device=device, dtype=torch.float32) + 0.5
+    ys = torch.arange(gh, device=device, dtype=torch.float32) + 0.5
+    dx2 = (xs.view(1, 1, gw) - gx.view(B, 1, 1)) ** 2 / (2 * sigma_x**2)
+    dy2 = (ys.view(1, gh, 1) - gy.view(B, 1, 1)) ** 2 / (2 * sigma_y**2)
+    target_heat = torch.exp(-(dx2 + dy2)).view(B, N)
+    target_heat = target_heat / target_heat.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+    log_probs = F.log_softmax(heat_logits, dim=-1)
+    heat_ce = -(target_heat * log_probs).sum(dim=-1)  # (B,)
+    heatmap_loss = (heat_ce * heat_valid).sum() / heat_valid.sum().clamp_min(1.0)
+
+    # --- Subpixel offset L1 at the ground-truth cell ---
+    cell_x = gx.long().clamp(max=gw - 1)
+    cell_y = gy.long().clamp(max=gh - 1)
+    cell_idx = cell_y * gw + cell_x  # (B,)
+    pred_off = offsets[torch.arange(B, device=device), cell_idx]  # (B, 2)
+    target_off = torch.stack((gx - cell_x.float() - 0.5, gy - cell_y.float() - 0.5), dim=-1)
+    offset_l1 = F.smooth_l1_loss(pred_off, target_off, reduction="none").sum(dim=-1)
+    offset_loss = (offset_l1 * heat_valid).sum() / heat_valid.sum().clamp_min(1.0)
+
+    # --- Visibility BCE over all rows ---
+    visibility_loss = F.binary_cross_entropy_with_logits(vis_logit, target_visible)
+
+    loss = (
+        config.heatmap_loss_weight * heatmap_loss
+        + config.offset_loss_weight * offset_loss
+        + config.visibility_loss_weight * visibility_loss
+    )
+
+    outputs = {
+        "heatmap_loss": heatmap_loss,
+        "offset_loss": offset_loss,
+        "visibility_loss": visibility_loss,
+    }
+
+    # --- Optional depth ---
+    if use_depth and "target_depth" in inputs:
+        depth_target = torch.nan_to_num(inputs["target_depth"].float().view(B) / config.depth_scale)
+        depth_valid = heat_valid * (~torch.isnan(inputs["target_depth"].view(B))).float()
+        depth_err = F.smooth_l1_loss(
+            head_out["depth_scaled"].float(), depth_target, reduction="none"
+        )
+        depth_loss = (depth_err * depth_valid).sum() / depth_valid.sum().clamp_min(1.0)
+        loss = loss + config.depth_loss_weight * depth_loss
+        outputs["depth_loss"] = depth_loss
+
+    # --- Optional wall normal ---
+    if use_normal and "target_wall_normal" in inputs:
+        normal_target = inputs["target_wall_normal"].float().view(B, 3)
+        normal_valid = heat_valid * (~torch.isnan(normal_target).any(dim=-1)).float()
+        normal_err = F.mse_loss(
+            head_out["wall_normal"].float(), torch.nan_to_num(normal_target), reduction="none"
+        ).sum(dim=-1)
+        normal_loss = (normal_err * normal_valid).sum() / normal_valid.sum().clamp_min(1.0)
+        loss = loss + config.wall_normal_loss_weight * normal_loss
+        outputs["normal_loss"] = normal_loss
+
+    outputs["perception_loss"] = loss
+
+    # --- Monitoring metrics (no grad) ---
+    with torch.no_grad():
+        if pred_uv is None:
+            pred_uv = decode_uv(heat_logits, offsets, gh, gw, proc_w, proc_h)
+        err_px = torch.linalg.vector_norm(pred_uv.float() - uv, dim=-1)
+        n_vis = heat_valid.sum().clamp_min(1.0)
+        outputs["uv_err_px_metric"] = (err_px * heat_valid).sum() / n_vis
+        vis_pred = (torch.sigmoid(vis_logit) > 0.5).float()
+        outputs["visibility_acc_metric"] = (vis_pred == target_visible).float().mean()
+
+    return outputs
+
+
 class Gr00tN1d7Perception(PreTrainedModel):
     """VLM-only perception model: Qwen3-VL backbone + TargetPerceptionHead."""
 
@@ -196,29 +364,13 @@ class Gr00tN1d7Perception(PreTrainedModel):
     def _image_token_grid(
         self, backbone_output: BatchFeature, image_grid_thw: torch.Tensor
     ) -> Tuple[torch.Tensor, int, int]:
-        """Gather image-token features into (B, gh*gw, D) plus the grid shape.
-
-        Requires exactly one image per sample with identical grid shape across
-        the batch (the perception setup: single current wrist frame at a fixed
-        resolution)."""
-        vl_embeds = backbone_output["backbone_features"]
-        image_mask = backbone_output["image_mask"]
-        B = vl_embeds.shape[0]
-        assert image_grid_thw.shape[0] == B, (
-            f"Perception model expects exactly 1 image per sample, got "
-            f"{image_grid_thw.shape[0]} images for batch of {B}. Use a wrist-only "
-            f"modality config with video delta_indices=[0]."
+        """Gather image-token features into (B, gh*gw, D) plus the grid shape."""
+        return image_token_grid(
+            backbone_output["backbone_features"],
+            backbone_output["image_mask"],
+            image_grid_thw,
+            self._merge_size,
         )
-        merge = self._merge_size
-        t, h, w = (int(x) for x in image_grid_thw[0])
-        gh, gw = (h // merge), (w // merge)
-        n_tokens = t * gh * gw
-        counts = image_mask.sum(dim=1)
-        assert bool((counts == n_tokens).all()), (
-            f"Image token count mismatch: expected {n_tokens}, got {counts.tolist()}"
-        )
-        image_tokens = vl_embeds[image_mask].view(B, n_tokens, -1)
-        return image_tokens, gh, gw
 
     # ------------------------------------------------------------------
     # Forward / loss
@@ -229,97 +381,18 @@ class Gr00tN1d7Perception(PreTrainedModel):
         image_tokens, gh, gw = self._image_token_grid(backbone_output, inputs["image_grid_thw"])
         head_out = self.perception_head(image_tokens)
 
-        heat_logits = head_out["heat_logits"].float()  # (B, N)
-        offsets = head_out["offsets"].float()  # (B, N, 2)
-        vis_logit = head_out["vis_logit"].float()  # (B,)
-        B, N = heat_logits.shape
-        device = heat_logits.device
-
-        proc_w, proc_h = self._processed_image_size()
-
-        # Labels (from the perception processor): uv in processed-image px.
-        target_uv = inputs["target_uv"].float().view(B, 2)
-        target_visible = inputs["target_visible"].float().view(B)
-        heat_valid = target_visible * (~torch.isnan(target_uv).any(dim=-1)).float()
-
-        # Normalized target coords in [0,1] (NaN-safe; invalid rows are masked out).
-        uv = torch.nan_to_num(target_uv)
-        u_norm = (uv[:, 0] / proc_w).clamp(0.0, 1.0 - 1e-6)
-        v_norm = (uv[:, 1] / proc_h).clamp(0.0, 1.0 - 1e-6)
-        gx = u_norm * gw  # continuous grid coords, cell units
-        gy = v_norm * gh
-
-        # --- Heatmap CE against a normalized Gaussian rendered on the cell grid ---
-        sigma_x = self.config.heatmap_target_sigma_px / proc_w * gw
-        sigma_y = self.config.heatmap_target_sigma_px / proc_h * gh
-        xs = torch.arange(gw, device=device, dtype=torch.float32) + 0.5
-        ys = torch.arange(gh, device=device, dtype=torch.float32) + 0.5
-        dx2 = (xs.view(1, 1, gw) - gx.view(B, 1, 1)) ** 2 / (2 * sigma_x**2)
-        dy2 = (ys.view(1, gh, 1) - gy.view(B, 1, 1)) ** 2 / (2 * sigma_y**2)
-        target_heat = torch.exp(-(dx2 + dy2)).view(B, N)
-        target_heat = target_heat / target_heat.sum(dim=-1, keepdim=True).clamp_min(1e-8)
-        log_probs = F.log_softmax(heat_logits, dim=-1)
-        heat_ce = -(target_heat * log_probs).sum(dim=-1)  # (B,)
-        heatmap_loss = (heat_ce * heat_valid).sum() / heat_valid.sum().clamp_min(1.0)
-
-        # --- Subpixel offset L1 at the ground-truth cell ---
-        cell_x = gx.long().clamp(max=gw - 1)
-        cell_y = gy.long().clamp(max=gh - 1)
-        cell_idx = cell_y * gw + cell_x  # (B,)
-        pred_off = offsets[torch.arange(B, device=device), cell_idx]  # (B, 2)
-        target_off = torch.stack((gx - cell_x.float() - 0.5, gy - cell_y.float() - 0.5), dim=-1)
-        offset_l1 = F.smooth_l1_loss(pred_off, target_off, reduction="none").sum(dim=-1)
-        offset_loss = (offset_l1 * heat_valid).sum() / heat_valid.sum().clamp_min(1.0)
-
-        # --- Visibility BCE over all rows ---
-        visibility_loss = F.binary_cross_entropy_with_logits(vis_logit, target_visible)
-
-        loss = (
-            self.config.heatmap_loss_weight * heatmap_loss
-            + self.config.offset_loss_weight * offset_loss
-            + self.config.visibility_loss_weight * visibility_loss
+        outputs = perception_losses(
+            self.config,
+            head_out,
+            inputs,
+            gh,
+            gw,
+            use_depth=self.perception_head.use_depth,
+            use_normal=self.perception_head.use_normal,
         )
-
-        outputs = {
-            "heatmap_loss": heatmap_loss,
-            "offset_loss": offset_loss,
-            "visibility_loss": visibility_loss,
-        }
-
-        # --- Optional depth ---
-        if self.perception_head.use_depth and "target_depth" in inputs:
-            depth_target = torch.nan_to_num(
-                inputs["target_depth"].float().view(B) / self.config.depth_scale
-            )
-            depth_valid = heat_valid * (~torch.isnan(inputs["target_depth"].view(B))).float()
-            depth_err = F.smooth_l1_loss(
-                head_out["depth_scaled"].float(), depth_target, reduction="none"
-            )
-            depth_loss = (depth_err * depth_valid).sum() / depth_valid.sum().clamp_min(1.0)
-            loss = loss + self.config.depth_loss_weight * depth_loss
-            outputs["depth_loss"] = depth_loss
-
-        # --- Optional wall normal ---
-        if self.perception_head.use_normal and "target_wall_normal" in inputs:
-            normal_target = inputs["target_wall_normal"].float().view(B, 3)
-            normal_valid = heat_valid * (~torch.isnan(normal_target).any(dim=-1)).float()
-            normal_err = F.mse_loss(
-                head_out["wall_normal"].float(), torch.nan_to_num(normal_target), reduction="none"
-            ).sum(dim=-1)
-            normal_loss = (normal_err * normal_valid).sum() / normal_valid.sum().clamp_min(1.0)
-            loss = loss + self.config.wall_normal_loss_weight * normal_loss
-            outputs["normal_loss"] = normal_loss
-
-        outputs["loss"] = loss
-
-        # --- Monitoring metrics (no grad) ---
-        with torch.no_grad():
-            pred_uv = self._decode_uv(heat_logits, offsets, gh, gw)
-            err_px = torch.linalg.vector_norm(pred_uv - uv, dim=-1)
-            n_vis = heat_valid.sum().clamp_min(1.0)
-            outputs["uv_err_px_metric"] = (err_px * heat_valid).sum() / n_vis
-            vis_pred = (torch.sigmoid(vis_logit) > 0.5).float()
-            outputs["visibility_acc_metric"] = (vis_pred == target_visible).float().mean()
+        # For this model the perception loss IS the training loss; drop the alias
+        # so wandb does not log the same number under two names.
+        outputs["loss"] = outputs.pop("perception_loss")
 
         # Plain dict (not BatchFeature): HF Trainer's compute_loss requires a dict
         # subclass to index outputs["loss"].
@@ -327,22 +400,14 @@ class Gr00tN1d7Perception(PreTrainedModel):
 
     def _processed_image_size(self) -> Tuple[float, float]:
         """(W, H) of the processor's output image — the frame target_uv lives in."""
-        size = self.config.image_target_size
-        if isinstance(size, (tuple, list)):
-            return float(size[1]), float(size[0])  # stored as (H, W)
-        return float(size), float(size)
+        return processed_image_size(self.config.image_target_size)
 
     def _decode_uv(
         self, heat_logits: torch.Tensor, offsets: torch.Tensor, gh: int, gw: int
     ) -> torch.Tensor:
         """Argmax cell + its subpixel offset -> uv in processed-image px, (B, 2)."""
-        B = heat_logits.shape[0]
         proc_w, proc_h = self._processed_image_size()
-        best = heat_logits.argmax(dim=-1)  # (B,)
-        off = offsets[torch.arange(B, device=heat_logits.device), best].clamp(-0.5, 0.5)
-        cx = (best % gw).float() + 0.5 + off[:, 0]
-        cy = (best // gw).float() + 0.5 + off[:, 1]
-        return torch.stack((cx / gw * proc_w, cy / gh * proc_h), dim=-1)
+        return decode_uv(heat_logits, offsets, gh, gw, proc_w, proc_h)
 
     # ------------------------------------------------------------------
     # Inference
