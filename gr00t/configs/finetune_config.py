@@ -418,11 +418,12 @@ class PerceptionActionFinetuneConfig(_PerceptionCommonConfig):
     """Std (metres) of the RANDOM part of the depth error (measured single-frame spread
     4.32 mm). The systematic part is perception_cond_bias_depth_m."""
 
-    perception_cond_bias_depth_m: float = 0.0065
-    """Systematic depth offset (metres) added to the teacher-forced depth. Measured
-    +6.49 mm, which is 84% of the mean-square depth error — the depth output is
-    consistently long and accumulating detections does not fix it. Applied in eval mode
-    too. Set to 0 if a newer perception checkpoint removes the offset."""
+    perception_cond_bias_depth_m: float = 0.0
+    """Systematic depth offset (metres) added to the teacher-forced depth. 0 by default
+    because the default run trains a fresh perception head whose bias is unknown, and a
+    wrong bias is worse than none — it teaches the policy to compensate for an offset that
+    is not there. Set to 0.0065 when overlaying checkpoints-perceptionv1 (its measured
+    +6.49 mm, 84% of its mean-square depth error). Applied in eval mode too."""
 
     perception_cond_noise_normal: float = 0.04
     """Std of the noise on the teacher-forced wall normal. From the same eval's rotation

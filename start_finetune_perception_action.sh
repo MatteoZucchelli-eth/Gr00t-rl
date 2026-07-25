@@ -61,7 +61,7 @@ PERCEPTION_LOSS_WEIGHT="${PERCEPTION_LOSS_WEIGHT:-1.0}"
 # perfect perception and it will be brittle on the robot.
 COND_NOISE_UV_PX="${COND_NOISE_UV_PX:-3.0}"        # 0.85 px single-frame x3 (motion/far range)
 COND_NOISE_DEPTH_M="${COND_NOISE_DEPTH_M:-0.004}"  # random part only: 4.32 mm spread
-COND_BIAS_DEPTH_M="${COND_BIAS_DEPTH_M:-0.0065}"   # SYSTEMATIC +6.49 mm: 84% of the depth error
+COND_BIAS_DEPTH_M="${COND_BIAS_DEPTH_M:-0.0}"      # 0 for a fresh head; 0.0065 when reusing perceptionv1
 COND_NOISE_NORMAL="${COND_NOISE_NORMAL:-0.04}"     # rotation spread 3.49 deg
 # Fraction of steps the policy is told "target not visible" even when it is, so it
 # learns to hold/search instead of collapsing when perception drops out.

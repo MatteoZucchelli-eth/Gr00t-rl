@@ -160,16 +160,22 @@ class Gr00tN1d7PerceptionActionConfig(Gr00tN1d7PerceptionConfig):
     """Std (metres) of the RANDOM part of the depth error. Measured single-frame spread
     4.32 mm, with the systematic part split out into perception_cond_bias_depth_m."""
 
-    perception_cond_bias_depth_m: float = 0.0065
+    perception_cond_bias_depth_m: float = 0.0
     """SYSTEMATIC depth offset (metres) added to the teacher-forced depth, so the policy
     trains on the depth it will actually be handed rather than an unbiased one.
 
-    Measured +6.49 mm on the 1500_perception_planner eval, where it accounts for 84% of
-    the mean-square depth error — the depth output is consistently long, and averaging
-    detections does not reduce it. A zero-mean noise cannot represent that, which is why
-    this is a separate term. Unlike the noise it is applied in eval mode too: a bias the
-    model always exhibits is not a training-time perturbation. Set to 0 if a future
-    perception checkpoint (or an extrinsics fix) removes the offset."""
+    Defaults to 0 because the default run trains a FRESH perception head, whose depth
+    bias is unknown. Unlike the noise terms, a bias is a directional claim: applying
+    +6.5 mm to a head that does not have it would teach the policy to compensate for an
+    offset that is not there, leaving it wrong by that much in the other direction. Noise
+    is a robustness measure and is safe to keep on; a bias is not.
+
+    Set it when you overlay a checkpoint whose bias you have measured. For
+    checkpoints-perceptionv1 that value is 0.0065 (+6.49 mm on the
+    1500_perception_planner eval, 84% of its mean-square depth error, and unaffected by
+    averaging detections). Applied in eval mode too — a bias the model always exhibits is
+    not a training-time perturbation. Re-measure with
+    scripts/calibrate_perception_conditioning.py."""
 
     perception_cond_noise_normal: float = 0.04
     """Std (unit-vector units) of the noise added to the teacher-forced wall normal.

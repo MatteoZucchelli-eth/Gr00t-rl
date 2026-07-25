@@ -80,7 +80,7 @@ echo "BASE_MODEL_PATH:       nvidia/GR00T-N1.7-3B (fixed)"
 echo "SELECT_LAYER:          ${SELECT_LAYER:-16}"
 echo "PERCEPTION_MODEL_PATH: ${PERCEPTION_MODEL_PATH:-<none: fresh perception head>}"
 echo "COND_NOISE_UV_PX:      ${COND_NOISE_UV_PX:-3.0 (measured, 1500 perception ckpt)}"
-echo "COND_BIAS_DEPTH_M:     ${COND_BIAS_DEPTH_M:-0.0065 (systematic depth offset)}"
+echo "COND_BIAS_DEPTH_M:     ${COND_BIAS_DEPTH_M:-0.0 (set 0.0065 only when reusing perceptionv1)}"
 echo "DATASET:               $DATASET_HOST_DIR"
 echo "==========================================="
 
