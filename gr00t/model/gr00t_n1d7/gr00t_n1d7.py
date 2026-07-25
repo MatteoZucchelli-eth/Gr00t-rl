@@ -47,6 +47,16 @@ def rot6d_orthonormalize(rot6d: torch.Tensor) -> torch.Tensor:
     return torch.cat((a, b), dim=-1)
 
 
+def _masked_mean_pool(
+    embeds: torch.Tensor, attention_mask: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Mean-pool token embeddings over valid (non-padding) tokens, shape (B, D)."""
+    if attention_mask is None:
+        return embeds.mean(dim=1)
+    mask = attention_mask.to(embeds.dtype).unsqueeze(-1)
+    return (embeds * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
+
+
 class TipTargetHead(nn.Module):
     """Auxiliary head predicting the target pose in the end-effector (tip) frame.
 
@@ -62,6 +72,11 @@ class TipTargetHead(nn.Module):
     DiT can condition fine motion on where the target is relative to the tip
     -- teacher-forced on ground truth during training, fed its own prediction
     at inference.
+
+    `pool="mean"` selects the original masked-mean pooling (no learned queries,
+    predictor takes a single `latent_dim` vector). It exists purely so that
+    checkpoints trained before the attention pooling landed still load; new
+    training should stay on the default `pool="attn"`.
     """
 
     def __init__(
@@ -73,14 +88,25 @@ class TipTargetHead(nn.Module):
         xyz_scale: float,
         num_queries: int = 4,
         num_attn_heads: int = 8,
+        pool: str = "attn",
     ):
         super().__init__()
+        if pool not in ("attn", "mean"):
+            raise ValueError(f"tip_target_pool must be 'attn' or 'mean', got {pool!r}")
         self.xyz_scale = xyz_scale
-        self.pool_queries = nn.Parameter(torch.randn(num_queries, latent_dim) * 0.02)
-        self.pool_attn = nn.MultiheadAttention(latent_dim, num_attn_heads, batch_first=True)
-        self.pool_norm = nn.LayerNorm(latent_dim)
+        self.pool = pool
+        if pool == "attn":
+            self.pool_queries = nn.Parameter(torch.randn(num_queries, latent_dim) * 0.02)
+            self.pool_attn = nn.MultiheadAttention(latent_dim, num_attn_heads, batch_first=True)
+            self.pool_norm = nn.LayerNorm(latent_dim)
+            predictor_in_dim = latent_dim * num_queries
+        else:
+            self.pool_queries = None
+            self.pool_attn = None
+            self.pool_norm = None
+            predictor_in_dim = latent_dim
         self.predictor = nn.Sequential(
-            nn.Linear(latent_dim * num_queries, hidden_dim),
+            nn.Linear(predictor_in_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
@@ -105,10 +131,11 @@ class TipTargetHead(nn.Module):
         (they come back as uninitialized/zero memory -- garbage queries NaN the
         attention softmax on the first forward).
         """
-        with torch.no_grad():
-            self.pool_queries.normal_(0.0, 0.02)
-        self.pool_attn._reset_parameters()
-        self.pool_norm.reset_parameters()
+        if self.pool == "attn":
+            with torch.no_grad():
+                self.pool_queries.normal_(0.0, 0.02)
+            self.pool_attn._reset_parameters()
+            self.pool_norm.reset_parameters()
         for module in list(self.predictor) + (list(self.cond_embed) if self.cond_embed else []):
             if isinstance(module, nn.Linear):
                 module.reset_parameters()
@@ -117,6 +144,8 @@ class TipTargetHead(nn.Module):
         self, vl_embeds: torch.Tensor, attention_mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Predict the scaled 9d target (xyz / xyz_scale, raw rot6d), shape (B, 9)."""
+        if self.pool == "mean":
+            return self.predictor(_masked_mean_pool(vl_embeds, attention_mask))
         queries = (
             self.pool_queries.to(vl_embeds.dtype).unsqueeze(0).expand(vl_embeds.shape[0], -1, -1)
         )
@@ -224,6 +253,7 @@ class Gr00tN1d7ActionHead(nn.Module):
                 xyz_scale=config.tip_target_xyz_scale,
                 num_queries=getattr(config, "tip_target_num_queries", 4),
                 num_attn_heads=getattr(config, "tip_target_attn_heads", 8),
+                pool=getattr(config, "tip_target_pool", "attn"),
             )
             # Teacher-forcing noise std in the head's scaled space: metric xyz
             # noise is divided by xyz_scale, rot6d noise is used as-is.

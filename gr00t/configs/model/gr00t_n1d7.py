@@ -152,6 +152,9 @@ class Gr00tN1d7Config(PretrainedConfig):
     tip_target_hidden_dim: int = 512
     tip_target_num_queries: int = 4  # learned queries for the attention pooling
     tip_target_attn_heads: int = 8  # heads of the pooling cross-attention
+    # "attn" (default) = learned-query cross-attention pooling; "mean" = the original
+    # masked-mean pool, kept only so pre-attention-pooling checkpoints still load.
+    tip_target_pool: str = "attn"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

@@ -383,6 +383,14 @@ class Gr00tTrainer(Trainer):
                 value = outputs.get(key)
                 if value is not None:
                     aux_logs[key] = float(value.detach().item())
+            # Perception-model losses/metrics: log any scalar output named
+            # "*_loss" or "*_metric" that isn't already covered above.
+            if hasattr(outputs, "items"):
+                for key, value in outputs.items():
+                    if key in aux_logs or key == "loss" or not torch.is_tensor(value):
+                        continue
+                    if value.ndim == 0 and (key.endswith("_loss") or key.endswith("_metric")):
+                        aux_logs[key] = float(value.detach().item())
             tip_target_pred = outputs.get("tip_target_pred")
             if tip_target_pred is not None:
                 # Mean predicted tip->target distance (metres) — should track the

@@ -80,6 +80,11 @@ class DataConfig:
     random_chop: float = 0.0
     mock_dataset_mode: bool = False  # if True, cache the first datapoint of each dataset and always return one of them to simulate best-case dataloading
 
+    # Only sample steps in the labelled fine (close-range) phase of each episode,
+    # based on the heatmap_labels/ sidecar (fine_phase & label_ok). Used by the
+    # perception-only finetune; episodes without labels are skipped.
+    fine_phase_only: bool = False
+
     # Data loading
     shuffle: bool = True
     seed: int = 42

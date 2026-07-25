@@ -83,6 +83,16 @@ def extract_step_data(
             episode_data["tip_target_9d"].iloc[step_index], dtype=np.float32
         )
 
+    # Heatmap perception labels (see LeRobotEpisodeLoader._load_heatmap_labels).
+    if "target_uv" in episode_data.columns:
+        row = episode_data.iloc[step_index]
+        metadata["target_uv"] = np.asarray(row["target_uv"], dtype=np.float32)
+        metadata["target_visible"] = bool(row["target_visible"])
+        metadata["target_fine_phase"] = bool(row["target_fine_phase"])
+        metadata["target_label_ok"] = bool(row["target_label_ok"])
+        metadata["target_depth"] = np.float32(row["target_depth"])
+        metadata["target_wall_normal"] = np.asarray(row["target_wall_normal"], dtype=np.float32)
+
     vla_step_data = VLAStepData(
         images=video_data,
         masks=mask_data if mask_data else None,
@@ -126,6 +136,9 @@ class ShardedSingleStepDataset(ShardedDataset):
         episode_sampling_rate: Fraction of episode timesteps to use (for efficiency)
         seed: Random seed for reproducible sharding and sampling
         allow_padding: Whether to allow padding of indices to valid range [0, max_length - 1]
+        fine_phase_only: If True, only sample steps in the labelled fine (close-range)
+            phase of each episode (heatmap sidecar labels: fine_phase & label_ok).
+            Episodes without heatmap labels are skipped entirely.
 
     Example:
         >>> dataset = ShardedSingleStepDataset(
@@ -155,9 +168,11 @@ class ShardedSingleStepDataset(ShardedDataset):
         episode_sampling_rate: float = 0.1,
         seed: int = 42,
         allow_padding: bool = False,
+        fine_phase_only: bool = False,
     ):
         """Initialize single-step dataset with sharding configuration."""
         super().__init__(dataset_path)
+        self.fine_phase_only = fine_phase_only
         self.embodiment_tag = embodiment_tag
         self.modality_configs = modality_configs
         self.video_backend = video_backend
@@ -203,10 +218,31 @@ class ShardedSingleStepDataset(ShardedDataset):
             f"No valid trajectories found for dataset {self.dataset_path}"
         )
 
+        # Valid step indices per episode (all steps, or fine-phase-only steps).
+        episode_step_indices = {
+            ep_idx: self.get_valid_step_indices(ep_idx) for ep_idx in shuffled_episode_indices
+        }
+        episode_step_indices = {k: v for k, v in episode_step_indices.items() if len(v) > 0}
+        if self.fine_phase_only:
+            n_skipped = len(shuffled_episode_indices) - len(episode_step_indices)
+            print(
+                f"fine_phase_only: {len(episode_step_indices)} episodes with labelled "
+                f"fine-phase steps ({n_skipped} episodes skipped)"
+            )
+        shuffled_episode_indices = [
+            ep_idx for ep_idx in shuffled_episode_indices if ep_idx in episode_step_indices
+        ]
+        assert len(shuffled_episode_indices) > 0, (
+            f"No valid steps found for dataset {self.dataset_path}"
+            + (
+                " (fine_phase_only=True: are heatmap_labels/ present?)"
+                if self.fine_phase_only
+                else ""
+            )
+        )
+
         # Calculate total timesteps and required number of shards
-        total_steps = np.sum(
-            [self.get_effective_episode_length(idx) for idx in shuffled_episode_indices]
-        ).astype(int)
+        total_steps = int(np.sum([len(v) for v in episode_step_indices.values()]))
         num_shards = np.ceil(total_steps / self.shard_size).astype(int)
 
         # Initialize shard containers
@@ -216,10 +252,12 @@ class ShardedSingleStepDataset(ShardedDataset):
         # Distribute episode sub-sequences across shards
         for ep_idx in shuffled_episode_indices:
             # Split episode timesteps into multiple sub-sequences
-            step_indices = np.arange(0, self.get_effective_episode_length(ep_idx))
+            step_indices = episode_step_indices[ep_idx].copy()
             self.rng.shuffle(step_indices)
             for i in range(num_splits):
                 split_step_indices = step_indices[i::num_splits]
+                if len(split_step_indices) == 0:
+                    continue
                 # Assign to shard with minimum current length (greedy balancing)
                 shard_index = np.argmin(shard_lengths)
                 sharded_episodes[shard_index].append((ep_idx, split_step_indices))
@@ -241,6 +279,21 @@ class ShardedSingleStepDataset(ShardedDataset):
         """Get the effective episode length accounting for action horizon."""
         original_length = self.episode_loader.get_episode_length(episode_index)
         return max(0, original_length - self.action_horizon + 1)
+
+    def get_valid_step_indices(self, episode_index: int) -> np.ndarray:
+        """Step indices of an episode eligible for sampling.
+
+        Default: all steps up to the effective length (action horizon respected).
+        With fine_phase_only: only steps in the labelled fine phase (heatmap sidecar
+        labels); episodes without labels yield an empty array.
+        """
+        effective_length = self.get_effective_episode_length(episode_index)
+        if not self.fine_phase_only:
+            return np.arange(0, effective_length)
+        mask = self.episode_loader.get_heatmap_step_mask(episode_index)
+        if mask is None:
+            return np.array([], dtype=int)
+        return np.where(mask[:effective_length])[0]
 
     def __len__(self):
         """Return the number of shards in the dataset."""

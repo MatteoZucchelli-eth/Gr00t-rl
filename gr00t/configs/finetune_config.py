@@ -213,3 +213,103 @@ class FinetuneConfig:
     """If True, skip loading model weights from base_model_path (architecture only).
     The processor (tokenizer/config) is still loaded from base_model_path.
     Useful for CI/testing to skip the slow checkpoint shard loading."""
+
+
+@dataclass
+class PerceptionFinetuneConfig:
+    """Configuration for fine-tuning the perception-only model (VLM backbone +
+    target heatmap head) used in the short-range fine approach.
+
+    The model sees ONLY the current wrist-camera frame + instruction and predicts
+    the wall-target location as a heatmap in wrist-camera pixels, a visibility
+    flag, and optionally target depth / wall normal. Training samples only the
+    labelled fine-phase frames (heatmap_labels/ sidecar next to data/).
+    """
+
+    # --- Data and Model Paths ---
+    base_model_path: str | None = None
+    """Checkpoint to initialize the VLM backbone from. Accepts a full VLA checkpoint
+    (e.g. one of your finetuned GR00T runs — action-head weights are ignored) or a
+    previous perception checkpoint. If None, starts from the raw Cosmos-Reason2-2B
+    backbone weights."""
+
+    dataset_path: str = "./g1_dataset"
+    """Path to the dataset root (must contain the heatmap_labels/ sidecar directory)."""
+
+    embodiment_tag: str = "NEW_EMBODIMENT"
+    """Embodiment tag (name or value, case-insensitive)."""
+
+    modality_config_path: str | None = None
+    """Path to a Python file registering the WRIST-ONLY modality config
+    (see register_perception_modality.py)."""
+
+    # --- Model Tuning Flags ---
+    tune_llm: bool = False
+    """If True, fine-tune the (truncated) language model of the backbone."""
+
+    tune_visual: bool = True
+    """If True, fine-tune the vision encoder. Recommended: the heatmap precision
+    comes almost entirely from the visual features."""
+
+    tune_top_llm_layers: int = 0
+    """Number of top LLM layers to tune (0 = none). Cheaper alternative to tune_llm
+    for adapting the fused vision-language features."""
+
+    # --- Perception Head / Loss ---
+    heatmap_hidden_dim: int = 512
+    """Hidden width of the perception head MLPs."""
+
+    heatmap_target_sigma_px: float = 8.0
+    """Std (processed-image px) of the Gaussian target rendered around the label."""
+
+    heatmap_loss_weight: float = 1.0
+    """Weight of the heatmap cross-entropy (visible frames only)."""
+
+    offset_loss_weight: float = 1.0
+    """Weight of the subpixel offset loss at the ground-truth cell."""
+
+    visibility_loss_weight: float = 0.5
+    """Weight of the visibility BCE (all frames)."""
+
+    depth_loss_weight: float = 0.1
+    """Weight of the target-depth loss (0 disables the depth output)."""
+
+    wall_normal_loss_weight: float = 0.1
+    """Weight of the wall-normal loss (0 disables the wall-normal output)."""
+
+    # --- Image Resolution ---
+    image_target_size: int = 720
+    """Square edge (px) the wrist image is resized to before the VLM. Native wrist
+    resolution is 720; keep it for maximum px precision at short range."""
+
+    image_crop_size: int = 648
+    """Square edge (px) of the random/center crop (must be < image_target_size)."""
+
+    # --- Data Augmentation ---
+    color_jitter_params: dict[str, float] | None = None
+    """Color jitter parameters ({"brightness","contrast","saturation","hue"}).
+    Keep hue/saturation LOW: the target is red-semantic. NOTE: never enable
+    rotation augmentation here without care — the keypoint follows the transform,
+    but the wall-normal label does not."""
+
+    # --- Training Configuration ---
+    global_batch_size: int = 32
+    dataloader_num_workers: int = 2
+    learning_rate: float = 1e-4
+    gradient_accumulation_steps: int = 1
+    output_dir: str = "./outputs-perception"
+    experiment_name: str | None = None
+    wandb_project: str = "finetune-gr00t-n1d7-perception"
+    save_steps: int = 1000
+    save_total_limit: int = 5
+    num_gpus: int = 1
+    use_wandb: bool = False
+    max_steps: int = 10000
+    weight_decay: float = 1e-5
+    warmup_ratio: float = 0.05
+    shard_size: int = 2**10
+    episode_sampling_rate: float = 0.1
+    num_shards_per_epoch: int = int(1e5)
+    save_only_model: bool = False
+    skip_weight_loading: bool = False
+    """If True, skip loading weights from base_model_path (smoke tests)."""

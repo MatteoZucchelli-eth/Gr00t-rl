@@ -353,6 +353,21 @@ class LetterBoxPad(A.DualTransform):
             img, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT, value=0
         )
 
+    def apply_to_keypoints(
+        self,
+        keypoints: np.ndarray,
+        pad_top: int = 0,
+        pad_bottom: int = 0,
+        pad_left: int = 0,
+        pad_right: int = 0,
+        **params,
+    ) -> np.ndarray:
+        keypoints = np.asarray(keypoints, dtype=np.float32).copy()
+        if len(keypoints) > 0:
+            keypoints[:, 0] += pad_left
+            keypoints[:, 1] += pad_top
+        return keypoints
+
     def get_params_dependent_on_data(self, params, data) -> dict[str, int]:
         h, w = params["shape"][:2]
         if h == w:
@@ -379,9 +394,15 @@ def build_image_transformations_albumentations(
     shortest_image_edge,
     crop_fraction,
     extra_augmentation_config: dict | None = None,
+    with_keypoints: bool = False,
 ):
     """
     Build albumentations-based image transformations equivalent to the torchvision version.
+
+    When ``with_keypoints=True`` both composes accept a ``keypoints`` array in "xy"
+    (pixel) format and return the transformed coordinates; points pushed outside the
+    frame by the crop are kept (remove_invisible=False) so the caller can decide how
+    to handle them (e.g. mark the target as not visible).
 
     Args:
         image_target_size: Target size for resizing (list of [height, width])
@@ -440,7 +461,10 @@ def build_image_transformations_albumentations(
             )
         )
 
-    train_transform = A.ReplayCompose(train_transform_list, p=1.0)
+    keypoint_params = (
+        A.KeypointParams(format="xy", remove_invisible=False) if with_keypoints else None
+    )
+    train_transform = A.ReplayCompose(train_transform_list, p=1.0, keypoint_params=keypoint_params)
 
     # === Mask-based augmentations (applied per-frame, NOT in ReplayCompose) ===
     # These transforms depend on per-frame mask data and must not be replayed
@@ -483,7 +507,8 @@ def build_image_transformations_albumentations(
             A.SmallestMaxSize(max_size=max_size, interpolation=cv2.INTER_AREA),
             FractionalCenterCrop(crop_fraction=fraction_to_use),
             A.SmallestMaxSize(max_size=max_size, interpolation=cv2.INTER_AREA),
-        ]
+        ],
+        keypoint_params=keypoint_params,
     )
 
     return train_transform, eval_transform

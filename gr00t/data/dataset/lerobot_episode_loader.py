@@ -57,6 +57,11 @@ LEROBOT_STATS_FILE_NAME = "stats.json"
 LEROBOT_RELATIVE_STATS_FILE_NAME = "relative_stats.json"
 
 ALLOWED_MODALITIES = ["video", "state", "action", "language", "mask"]
+
+# Optional sidecar directory with per-frame target heatmap labels (wrist-camera
+# pixel coordinates of the wall target + visibility), mirroring the data/ chunk
+# layout: heatmap_labels/chunk-XXX/episode_XXXXXX.parquet, keyed by frame_index.
+HEATMAP_LABELS_DIR_NAME = "heatmap_labels"
 DEFAULT_COLUMN_NAMES = {
     "state": "observation.state",
     "action": "action",
@@ -402,7 +407,76 @@ class LeRobotEpisodeLoader:
                 lambda x: np.asarray(x, dtype=np.float32)
             )
 
+        # Optional per-frame target heatmap labels (see HEATMAP_LABELS_DIR_NAME).
+        # Joined on frame_index; frames without a label row get NaN/False.
+        label_df = self._load_heatmap_labels(episode_index, len(original_df))
+        if label_df is not None:
+            for col in label_df.columns:
+                loaded_df[col] = label_df[col].values
+
         return loaded_df
+
+    def _heatmap_labels_path(self, episode_index: int) -> Path:
+        chunk_idx = episode_index // self.chunk_size
+        return (
+            self.dataset_path
+            / HEATMAP_LABELS_DIR_NAME
+            / f"chunk-{chunk_idx:03d}"
+            / f"episode_{episode_index:06d}.parquet"
+        )
+
+    def _load_heatmap_labels(self, episode_index: int, num_frames: int) -> pd.DataFrame | None:
+        """Load the sidecar heatmap label parquet for an episode, aligned to frame index.
+
+        Returns a DataFrame with one row per frame (0..num_frames-1) and columns:
+          target_uv          (2,) float32 — target center in ORIGINAL camera px (NaN if unresolved)
+          target_visible     bool  — target actually visible in the wrist frame
+          target_fine_phase  bool  — frame belongs to the labelled fine (close-range) phase
+          target_label_ok    bool  — geometric label resolved for this frame
+          target_depth       float32 — z of the target in the camera frame (m, NaN if unresolved)
+          target_wall_normal (3,) float32 — wall normal in the camera frame (NaN if unresolved)
+        Returns None if the sidecar file does not exist.
+        """
+        path = self._heatmap_labels_path(episode_index)
+        if not path.exists():
+            return None
+        raw = pd.read_parquet(path)
+        raw = raw.set_index("frame_index").reindex(range(num_frames))
+        out = pd.DataFrame(index=range(num_frames))
+        uv = raw[["u", "v"]].to_numpy(dtype=np.float32)
+        out["target_uv"] = [row for row in uv]
+        out["target_visible"] = raw["visible"].fillna(False).astype(bool).values
+        out["target_fine_phase"] = raw["fine_phase"].fillna(False).astype(bool).values
+        out["target_label_ok"] = raw["label_ok"].fillna(False).astype(bool).values
+        out["target_depth"] = raw["depth_z"].to_numpy(dtype=np.float32)
+        normal = raw[["wall_normal_cam_0", "wall_normal_cam_1", "wall_normal_cam_2"]].to_numpy(
+            dtype=np.float32
+        )
+        out["target_wall_normal"] = [row for row in normal]
+        return out
+
+    def get_heatmap_step_mask(self, idx: int) -> np.ndarray | None:
+        """Boolean mask over frames of episode `idx` (loader index): True where the
+        frame belongs to the labelled fine phase with a resolved label
+        (fine_phase & label_ok).
+
+        Cheap (reads 3 columns); used at shard time to restrict perception training
+        to the close-range portion of each episode. Returns None if the episode has
+        no heatmap label file.
+        """
+        episode_meta = self.episodes_metadata[idx]
+        episode_id = episode_meta["episode_index"]
+        length = int(episode_meta["length"])
+        path = self._heatmap_labels_path(episode_id)
+        if not path.exists():
+            return None
+        cols = pd.read_parquet(path, columns=["frame_index", "fine_phase", "label_ok"])
+        mask = np.zeros(length, dtype=bool)
+        valid = cols["fine_phase"].astype(bool) & cols["label_ok"].astype(bool)
+        frame_idx = cols["frame_index"].to_numpy()
+        in_range = frame_idx < length
+        mask[frame_idx[in_range]] = valid.to_numpy()[in_range]
+        return mask
 
     def _load_video_data(self, episode_index: int, indices: np.ndarray) -> dict[str, np.ndarray]:
         """
