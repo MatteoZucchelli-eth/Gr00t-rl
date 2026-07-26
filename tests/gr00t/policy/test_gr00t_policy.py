@@ -168,3 +168,75 @@ class TestGr00tPolicyGetAction:
         action, info = policy.get_action(obs)
         assert isinstance(action, dict)
         assert isinstance(info, dict)
+
+    def test_options_reach_the_model(self, policy):
+        """`return_heatmap` and friends are model-side options, not policy-side."""
+        policy.get_action(_make_observation(), options={"return_heatmap": True})
+        assert policy.model.get_action.call_args.kwargs["options"] == {"return_heatmap": True}
+
+
+class TestGr00tPolicyInfoPayload:
+    """What the server ships back in `info` alongside the action chunk."""
+
+    @staticmethod
+    def _with_model_output(policy, **extra):
+        data = {"action_pred": torch.randn(1, 16, 7), **extra}
+        policy.model.get_action = MagicMock(return_value=BatchFeature(data=data))
+        return policy
+
+    def test_backbone_features_omitted_by_default(self, policy):
+        """~4 MB per response; nothing in the control loop wants them."""
+        self._with_model_output(
+            policy,
+            backbone_features=torch.randn(1, 24, 8),
+            backbone_attention_mask=torch.ones(1, 24, dtype=torch.bool),
+            image_mask=torch.ones(1, 24, dtype=torch.bool),
+        )
+        _, info = policy.get_action(_make_observation())
+        assert "backbone_features" not in info
+        assert "backbone_attention_mask" not in info
+        assert "image_mask" not in info
+
+    def test_backbone_features_on_request(self, policy):
+        """scripts/compute_dataset_embeddings.py opts in."""
+        self._with_model_output(
+            policy,
+            backbone_features=torch.randn(1, 24, 8),
+            image_mask=torch.ones(1, 24, dtype=torch.bool),
+        )
+        _, info = policy.get_action(_make_observation(), options={"return_backbone_features": True})
+        assert info["backbone_features"].shape == (1, 24, 8)
+        assert info["image_mask"].shape == (1, 24)
+
+    def test_perception_outputs_surface(self, policy):
+        """A perception-conditioned checkpoint's target estimate must reach the caller,
+        or a deployment cannot log or gate on what the action chunk was conditioned on."""
+        seen: dict[str, tuple[int, int]] = {}
+
+        def fake_uv_to_camera(uv, camera_size=(720, 720)):
+            seen["camera_size"] = camera_size
+            return uv * 2.0
+
+        self._with_model_output(
+            policy,
+            target_uv=torch.tensor([[100.0, 200.0]]),
+            visibility=torch.tensor([0.9]),
+            target_depth=torch.tensor([0.125]),
+            wall_normal=torch.tensor([[0.0, 0.0, 1.0]]),
+        )
+        policy.model.uv_processed_to_camera = fake_uv_to_camera
+
+        _, info = policy.get_action(_make_observation())
+
+        np.testing.assert_allclose(info["target_uv_processed_px"], [[100.0, 200.0]])
+        np.testing.assert_allclose(info["target_uv_px"], [[200.0, 400.0]])
+        assert seen["camera_size"] == (256, 256)  # the sample's own raw frame size
+        np.testing.assert_allclose(info["visibility"], [0.9], rtol=1e-6)
+        np.testing.assert_allclose(info["target_depth_m"], [0.125], rtol=1e-6)
+        np.testing.assert_allclose(info["wall_normal_cam"], [[0.0, 0.0, 1.0]])
+        for key in ("target_uv_processed_px", "visibility", "target_depth_m", "wall_normal_cam"):
+            assert info[key].dtype == np.float32
+
+    def test_no_perception_keys_for_a_plain_vla(self, policy):
+        _, info = self._with_model_output(policy).get_action(_make_observation())
+        assert not any(k.startswith("target_") or k == "visibility" for k in info)

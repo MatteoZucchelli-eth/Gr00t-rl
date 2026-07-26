@@ -437,9 +437,11 @@ class Gr00tPolicy(BasePolicy):
         collated_inputs = self.collate_fn(processed_inputs)
         collated_inputs = _rec_to_dtype(collated_inputs, dtype=torch.bfloat16)
 
-        # Step 4: Run model inference to predict actions
+        # Step 4: Run model inference to predict actions. `options` reaches the
+        # model itself (e.g. {"return_heatmap": True} on the perception-conditioned
+        # model), not just this method.
         with torch.inference_mode():
-            model_pred = self.model.get_action(**collated_inputs)
+            model_pred = self.model.get_action(**collated_inputs, options=options)
         normalized_action = model_pred["action_pred"].float()
 
         # Step 5: Decode actions from normalized space back to physical units
@@ -455,21 +457,25 @@ class Gr00tPolicy(BasePolicy):
             key: value.astype(np.float32) for key, value in unnormalized_action.items()
         }
 
-        # Surface the raw VLM backbone features (last hidden state, full token sequence)
-        # so callers can pool/probe them however they need.
         info = {}
-        if "backbone_features" in model_pred:
-            info["backbone_features"] = (
-                model_pred["backbone_features"].float().cpu().numpy()
-            )  # [B, seq_len, hidden_size]
-            if "backbone_attention_mask" in model_pred:
-                info["backbone_attention_mask"] = (
-                    model_pred["backbone_attention_mask"].cpu().numpy()
-                )  # [B, seq_len] bool: valid (non-padding) tokens
-            if "image_mask" in model_pred:
-                info["image_mask"] = (
-                    model_pred["image_mask"].cpu().numpy()
-                )  # [B, seq_len] bool: image-token positions
+
+        # The raw VLM backbone features (last hidden state, full token sequence) are
+        # ~4 MB per request and only offline probing tools want them, so they ship
+        # ONLY on request: options={"return_backbone_features": True}.
+        # See scripts/compute_dataset_embeddings.py.
+        if (options or {}).get("return_backbone_features", False):
+            if "backbone_features" in model_pred:
+                info["backbone_features"] = (
+                    model_pred["backbone_features"].float().cpu().numpy()
+                )  # [B, seq_len, hidden_size]
+                if "backbone_attention_mask" in model_pred:
+                    info["backbone_attention_mask"] = (
+                        model_pred["backbone_attention_mask"].cpu().numpy()
+                    )  # [B, seq_len] bool: valid (non-padding) tokens
+                if "image_mask" in model_pred:
+                    info["image_mask"] = (
+                        model_pred["image_mask"].cpu().numpy()
+                    )  # [B, seq_len] bool: image-token positions
 
         # Surface the predicted tip-frame target pose (tip-target head):
         # xyz(3, metres) + orthonormalized rot6d(6). ||xyz|| is the predicted
@@ -477,7 +483,62 @@ class Gr00tPolicy(BasePolicy):
         if "tip_target_pred" in model_pred:
             info["tip_target_pred"] = model_pred["tip_target_pred"].float().cpu().numpy()  # [B, 9]
 
+        info.update(self._perception_info(model_pred, observation))
+
         return casted_action, info
+
+    def _perception_info(
+        self, model_pred: dict[str, Any], observation: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Perception outputs of a perception-conditioned model (Gr00tN1d7PerceptionAction).
+
+        That model surfaces the target estimate its action chunk was conditioned on
+        alongside the chunk itself, so a deployment can log or gate on it without a
+        second forward pass. Key names match PerceptionPolicy's, so robot-side code
+        reads the perception-only server and this one the same way — except
+        `visible`, which is left to the caller: no threshold is defined here, and
+        `visibility` is the probability it would be compared against.
+
+        Empty for every other model.
+        """
+        if "target_uv" not in model_pred:
+            return {}
+
+        uv_processed = model_pred["target_uv"].float().cpu()  # (B, 2) processed-image px
+        info: dict[str, Any] = {
+            "target_uv_processed_px": uv_processed.numpy().astype(np.float32),
+        }
+
+        # Map back to RAW camera px using each sample's own frame size — the
+        # processed-px value is meaningless to a caller that never saw the crop.
+        if hasattr(self.model, "uv_processed_to_camera"):
+            video_key = self.modality_configs["video"].modality_keys[0]
+            frames = observation["video"][video_key]  # (B, T, H, W, C)
+            info["target_uv_px"] = (
+                torch.stack(
+                    [
+                        self.model.uv_processed_to_camera(
+                            uv_processed[i : i + 1],
+                            camera_size=(int(frames[i].shape[2]), int(frames[i].shape[1])),
+                        )[0]
+                        for i in range(uv_processed.shape[0])
+                    ]
+                )
+                .numpy()
+                .astype(np.float32)
+            )
+
+        # visibility (B,), target_depth_m (B,), wall_normal_cam (B, 3), and the full
+        # softmax heatmap (B, gh, gw) when options={"return_heatmap": True}.
+        for pred_key, info_key in (
+            ("visibility", "visibility"),
+            ("target_depth", "target_depth_m"),
+            ("wall_normal", "wall_normal_cam"),
+            ("heatmap", "heatmap"),
+        ):
+            if pred_key in model_pred:
+                info[info_key] = model_pred[pred_key].float().cpu().numpy().astype(np.float32)
+        return info
 
     def check_action(self, action: dict[str, Any]) -> None:
         """Validate that the action has the correct structure and types.

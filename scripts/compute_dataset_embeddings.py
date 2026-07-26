@@ -172,7 +172,11 @@ def main() -> None:
                 state_horizon,
             )
             try:
-                _, info = policy.get_action(observation=obs)
+                # Backbone features are opt-in: the server omits them unless asked
+                # (they are ~4 MB per response and nothing else needs them).
+                _, info = policy.get_action(
+                    observation=obs, options={"return_backbone_features": True}
+                )
             except Exception as e:
                 print(
                     f"  [episode {ep_idx:03d} frame {frame_idx}] inference error: {e}",
@@ -184,8 +188,9 @@ def main() -> None:
             image_mask = info.get("image_mask")  # (1, seq_len) bool
             if backbone_features is None or image_mask is None:
                 print(
-                    "ERROR: server returned no 'backbone_features'/'image_mask' in info. "
-                    "Make sure the patched Gr00tPolicy is running.",
+                    "ERROR: server returned no 'backbone_features'/'image_mask' in info "
+                    "despite options={'return_backbone_features': True}. Make sure a "
+                    "current Gr00tPolicy is running (restart the server after pulling).",
                     file=sys.stderr,
                 )
                 sys.exit(1)
