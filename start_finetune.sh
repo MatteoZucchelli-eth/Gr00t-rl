@@ -10,6 +10,13 @@ source .env
 # Override per run with:  RUN_NAME=red_and_green_v2 sbatch submit_euler.sh
 RUN_NAME="${RUN_NAME:-red_and_green}"
 
+# Dataset root, as seen from the training cwd (/workspace in the container).
+# g1_dataset_small_general: 747 episodes, 15 instruction phrasings over red/green/blue
+# targets, with all three squares in frame — so the instruction actually selects the
+# target. The older g1_dataset is a single task ("drill in the red square") and does not
+# exercise language at all. Override with DATASET_DIR=... to train on a different capture.
+DATASET_DIR="${DATASET_DIR:-./g1_dataset_small_general/}"
+
 # Set to true to train the auxiliary tip-target head: predicts the target pose
 # in the drill-tip frame as xyz(3) + rot6d(6) from the `next.tip_target_9d`
 # label and feeds it back as a conditioning token to the action head
@@ -49,6 +56,7 @@ OUTPUT_DIR="${GROOT_HOME:-/groot}/runs/${RUN_NAME}"
 
 # --- Debug: surface the resolved configuration (goes to stdout / the .out log) ---
 echo "[train] RUN_NAME=${RUN_NAME}"
+echo "[train] DATASET_DIR=${DATASET_DIR}"
 echo "[train] OUTPUT_DIR=${OUTPUT_DIR}"
 echo "[train] MASTER_PORT=${MASTER_PORT}"
 echo "[train] TIP_TARGET_ARGS=${TIP_TARGET_ARGS:-<none>}"
@@ -73,7 +81,7 @@ echo "[train] Launching torchrun..."
 set +e
 torchrun --nproc_per_node=2 --master_port=$MASTER_PORT gr00t/experiment/launch_finetune.py \
     --base-model-path nvidia/GR00T-N1.7-3B \
-    --dataset-path ./g1_dataset/ \
+    --dataset-path "${DATASET_DIR}" \
     --embodiment-tag NEW_EMBODIMENT \
     --modality-config-path register_new_modality.py \
     --output-dir "${OUTPUT_DIR}" \

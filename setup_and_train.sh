@@ -43,12 +43,14 @@ echo "[setup] Ensuring directory structure under $GROOT_HOME ..."
 mkdir -p "$GROOT_HOME/cache/checkpoints/groot"
 mkdir -p "$GROOT_HOME/data/"
 
-# --- 3. Verify dataset is available (bind-mounted from host as /workspace/g1_dataset) ---
-DATASET_DIR="$PROJECT_DIR/g1_dataset"
+# --- 3. Verify dataset is available (bind-mounted from host as /workspace/g1_dataset_small_general) ---
+DATASET_DIR="${DATASET_DIR:-$PROJECT_DIR/g1_dataset_small_general}"
+export DATASET_DIR  # start_finetune.sh honours it
+export DATASET_DIR
 
 if [ ! -d "$DATASET_DIR" ] || [ -z "$(ls -A "$DATASET_DIR" 2>/dev/null)" ]; then
     echo "[ERROR] Dataset not found at $DATASET_DIR"
-    echo "        Ensure g1_dataset/ is bind-mounted into the container."
+    echo "        Ensure the dataset is bind-mounted into the container at $DATASET_DIR."
     exit 1
 else
     echo "[setup] Dataset found at $DATASET_DIR"

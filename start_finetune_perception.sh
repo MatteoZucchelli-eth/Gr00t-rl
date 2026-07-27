@@ -9,6 +9,13 @@ source .env
 # resumes; bump it to start fresh (same caveats as start_finetune.sh).
 RUN_NAME="${RUN_NAME:-perception_v1}"
 
+# Dataset root, as seen from the training cwd (/workspace in the container). Must
+# contain the heatmap_labels/ sidecar. g1_dataset_small_general has 15 instruction
+# phrasings over red/green/blue targets with all three squares in frame, so the
+# instruction genuinely selects the target — which is what the head's text
+# cross-attention (--use-text-conditioning, on by default) is there to exploit.
+DATASET_DIR="${DATASET_DIR:-./g1_dataset_small_general/}"
+
 # Backbone init. Three choices:
 #   - A finetuned VLA run (best: one trained with --tune-visual at 720px — its
 #     vision encoder is already adapted to the task). Action-head weights ignored.
@@ -45,6 +52,7 @@ MASTER_PORT=$(shuf -i 10000-65000 -n 1)
 OUTPUT_DIR="${GROOT_HOME:-/groot}/runs/${RUN_NAME}"
 
 echo "[train] RUN_NAME=${RUN_NAME}"
+echo "[train] DATASET_DIR=${DATASET_DIR}"
 echo "[train] OUTPUT_DIR=${OUTPUT_DIR}"
 echo "[train] BASE_MODEL_PATH=${BASE_MODEL_PATH}"
 echo "[train] MASTER_PORT=${MASTER_PORT}"
@@ -59,7 +67,7 @@ set +e
 torchrun --nproc_per_node=2 --master_port=$MASTER_PORT \
     gr00t/experiment/launch_finetune_perception.py \
     "${BASE_MODEL_ARG[@]}" \
-    --dataset-path ./g1_dataset/ \
+    --dataset-path "${DATASET_DIR}" \
     --embodiment-tag NEW_EMBODIMENT \
     --modality-config-path register_perception_modality.py \
     --output-dir "${OUTPUT_DIR}" \

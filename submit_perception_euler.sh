@@ -22,9 +22,9 @@
 # (see its header). Additionally:
 #
 #   1. Sync the perception dataset — INCLUDING the heatmap_labels/ sidecar — to
-#      the work directory (from the repo root on your machine, where ./g1_dataset
+#      the work directory (from the repo root on your machine, where ./g1_dataset_small_general
 #      holds data/ videos/ meta/ heatmap_labels/):
-#        rsync -avP g1_dataset/ euler:/cluster/work/mrl/$USER/datasets/g1_dataset_perception/
+#        rsync -avP g1_dataset_small_general/ euler:/cluster/work/mrl/$USER/datasets/g1_dataset_small_general/
 #
 #   2. Make sure the codebase sync (rsync in submit_euler.sh header) has picked
 #      up the new files; they are bind-mounted individually below:
@@ -49,7 +49,7 @@ PROJECT_DIR="$HOME/groot"
 CONTAINER_TAR="/cluster/work/mrl/$USER/containers/groot-environment.tar.gz"
 GROOT_DIR="/cluster/scratch/$USER/groot"
 RESULTS_DIR="/cluster/project/mrl/$USER/results/groot/$SLURM_JOB_ID"
-DATASET_HOST_DIR="${DATASET_HOST_DIR:-/cluster/work/mrl/$USER/datasets/g1_dataset_perception}"
+DATASET_HOST_DIR="${DATASET_HOST_DIR:-/cluster/work/mrl/$USER/datasets/g1_dataset_small_general}"
 
 # Backbone init for the perception model (path as seen INSIDE the container).
 BASE_MODEL_PATH="${BASE_MODEL_PATH:-nvidia/GR00T-N1.7-3B}"
@@ -91,14 +91,14 @@ time tar -xzf "$CONTAINER_TAR" -C "$TMPDIR"
 # On top of the stats scan done on rank 0 (see submit_euler.sh), the perception
 # sharding additionally reads 3 columns from every heatmap label parquet
 # (~1500 files) to build the fine-phase step masks — local NVMe makes both fast.
-DATASET_LOCAL_DIR="$TMPDIR/g1_dataset"
+DATASET_LOCAL_DIR="$TMPDIR/g1_dataset_small_general"
 echo "[euler] Rsyncing dataset to local scratch (${DATASET_LOCAL_DIR})..."
 time rsync -a --info=progress2 "$DATASET_HOST_DIR/" "$DATASET_LOCAL_DIR/"
 echo "[euler] Dataset copy done."
 
 # --- Launch with Apptainer ---
 # Bindings mirror submit_euler.sh; differences:
-#   - dataset mounts at /workspace/g1_dataset (start_finetune_perception.sh expects ./g1_dataset)
+#   - dataset mounts at /workspace/g1_dataset_small_general (= start_finetune_perception.sh DATASET_DIR)
 #   - perception launch/setup scripts + wrist-only modality config are mounted
 #   - RUN_NAME / BASE_MODEL_PATH forwarded into the container
 echo "[euler] Starting container..."
@@ -111,7 +111,7 @@ time apptainer exec --nv \
     --bind "$PROJECT_DIR/setup_and_train_perception.sh:/workspace/setup_and_train_perception.sh" \
     --bind "$PROJECT_DIR/start_finetune_perception.sh:/workspace/start_finetune_perception.sh" \
     --bind "$PROJECT_DIR/register_perception_modality.py:/workspace/register_perception_modality.py" \
-    --bind "$DATASET_LOCAL_DIR:/workspace/g1_dataset" \
+    --bind "$DATASET_LOCAL_DIR:/workspace/g1_dataset_small_general" \
     --env TRITON_CACHE_DIR=/groot/cache/triton \
     --env TORCH_EXTENSIONS_DIR=/groot/cache/torch_kernels \
     --env XDG_CACHE_HOME=/groot/cache \

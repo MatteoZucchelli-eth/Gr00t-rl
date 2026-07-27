@@ -10,7 +10,7 @@
 #
 # Prerequisites:
 #   - .env must exist (or .env.sample copied and edited)
-#   - dataset bind-mounted at /workspace/g1_dataset, INCLUDING the heatmap_labels/
+#   - dataset bind-mounted at /workspace/g1_dataset_small_general, INCLUDING the heatmap_labels/
 #     sidecar directory — training filters to fine-phase frames and will abort
 #     without it.
 # =============================================================================
@@ -40,12 +40,13 @@ echo "[setup] GROOT_HOME=$GROOT_HOME"
 mkdir -p "$GROOT_HOME/cache/checkpoints/groot"
 mkdir -p "$GROOT_HOME/runs"
 
-# --- 3. Verify dataset (bind-mounted from host as /workspace/g1_dataset) ---
-DATASET_DIR="$PROJECT_DIR/g1_dataset"
+# --- 3. Verify dataset (bind-mounted from host as /workspace/g1_dataset_small_general) ---
+DATASET_DIR="${DATASET_DIR:-$PROJECT_DIR/g1_dataset_small_general}"
+export DATASET_DIR  # start_finetune_perception.sh honours it
 
 if [ ! -d "$DATASET_DIR" ] || [ -z "$(ls -A "$DATASET_DIR" 2>/dev/null)" ]; then
     echo "[ERROR] Dataset not found at $DATASET_DIR"
-    echo "        Ensure the dataset is bind-mounted into the container at /workspace/g1_dataset."
+    echo "        Ensure the dataset is bind-mounted into the container at $DATASET_DIR."
     exit 1
 fi
 if [ ! -d "$DATASET_DIR/heatmap_labels" ]; then
