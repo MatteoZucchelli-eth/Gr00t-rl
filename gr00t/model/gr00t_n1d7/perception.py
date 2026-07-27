@@ -94,10 +94,11 @@ class TargetPerceptionHead(nn.Module):
         #          meaningful tanh(g)~0.3 burns ~3000 steps before the branch trains.
         #   g>0    both learn from step 1, at the cost of perturbing the features at init.
         #
-        # 0.1 is a middle default. Note the safety argument for g=0 only applies when
-        # warm-starting from a checkpoint whose head is already trained: initialising
-        # from nvidia/GR00T-N1.7-3B builds the WHOLE head fresh, so there is no
-        # pretrained head stream to protect and a larger gate is strictly better.
+        # The safety argument for g=0 only applies when warm-starting from a checkpoint
+        # whose head is already trained: initialising from nvidia/GR00T-N1.7-3B builds the
+        # WHOLE head fresh, so there is no pretrained head stream to protect and a larger
+        # gate is strictly better. Hence Gr00tN1d7PerceptionConfig.text_gate_init = 0.5,
+        # which is what actually reaches this argument in a normal run.
         self.text_gate_init = text_gate_init
         if use_text_conditioning:
             self.text_norm = nn.LayerNorm(latent_dim)
@@ -392,7 +393,34 @@ def perception_losses(
         n_vis = heat_valid.sum().clamp_min(1.0)
         outputs["uv_err_px_metric"] = (err_px * heat_valid).sum() / n_vis
         vis_pred = (torch.sigmoid(vis_logit) > 0.5).float()
-        outputs["visibility_acc_metric"] = (vis_pred == target_visible).float().mean()
+        correct = (vis_pred == target_visible).float()
+
+        # Raw accuracy is inflated to uselessness by class imbalance: only ~3.5% of
+        # post-augmentation frames have target_visible=0, so a batch of 16 carries 0.55
+        # negatives on average and 57% of batches carry NONE. In such a batch every label
+        # is "visible", so a model that always answers "visible" scores exactly 1.0 while
+        # never being tested on the only question that matters. Kept for continuity, but
+        # read visibility_tnr_metric instead.
+        outputs["visibility_acc_metric"] = correct.mean()
+
+        n_pos = target_visible.sum()
+        n_neg = (1.0 - target_visible).sum()
+        nan = torch.tensor(float("nan"), device=correct.device, dtype=correct.dtype)
+        # NaN (not 0 or 1) when the batch has no example of a class — the metric is
+        # genuinely undefined there, and a fake value is what made the old one
+        # unreadable. wandb renders NaN as a gap.
+        tpr = torch.where(n_pos > 0, (correct * target_visible).sum() / n_pos.clamp_min(1.0), nan)
+        tnr = torch.where(
+            n_neg > 0, (correct * (1.0 - target_visible)).sum() / n_neg.clamp_min(1.0), nan
+        )
+        # Recall on the negatives: the one number that exposes a collapse to
+        # always-visible, since it is 0 exactly when the model never says "not visible".
+        outputs["visibility_tnr_metric"] = tnr
+        outputs["visibility_tpr_metric"] = tpr
+        outputs["visibility_balanced_acc_metric"] = 0.5 * (tpr + tnr)
+        # How often the batch could test the negative class at all — if this sits near 0,
+        # the visibility metrics are noise and the batch size is too small to judge them.
+        outputs["visibility_neg_frac_metric"] = n_neg / correct.numel()
 
     return outputs
 
