@@ -95,6 +95,7 @@ if __name__ == "__main__":
     model.visibility_loss_weight = ft_config.visibility_loss_weight
     model.depth_loss_weight = ft_config.depth_loss_weight
     model.wall_normal_loss_weight = ft_config.wall_normal_loss_weight
+    model.use_text_conditioning = ft_config.use_text_conditioning
 
     config.training.experiment_name = ft_config.experiment_name
     config.training.start_from_checkpoint = ft_config.base_model_path

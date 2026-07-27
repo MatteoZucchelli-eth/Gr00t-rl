@@ -68,6 +68,37 @@ class Gr00tN1d7PerceptionConfig(Gr00tN1d7Config):
     perception_pool_heads: int = 8
     """Attention heads of the learned-query pooling used by the visibility/depth/normal heads."""
 
+    use_text_conditioning: bool = True
+    """Let the head cross-attend over the instruction tokens (TargetPerceptionHead).
+
+    Required for any dataset where the instruction selects between several candidate
+    targets in the same frame — e.g. red/green/blue squares all in view. The backbone
+    cannot supply this on its own: its language model is causal and the prompt is
+    `<image><instruction>`, so the image block wholly precedes the instruction and no
+    image token can attend to it. With this off, the head is provably language-blind
+    (identical logits for "drill in the green target" and "drill in the blue target").
+
+    Set to False only to reproduce a pre-existing checkpoint like perceptionv1, or as
+    the ablation that shows the conditioning is what helps. Turning it on changes the
+    head's parameter set, so a checkpoint trained one way cannot be loaded the other."""
+
+    text_attn_heads: int = 8
+    """Attention heads of the head's instruction cross-attention."""
+
+    text_gate_init: float = 0.5
+    """Initial value of the learned scalar gate on the instruction cross-attention.
+
+    0 reproduces the unconditioned head exactly at init but leaves the branch inert
+    (its gradient is scaled by tanh(0)=0), costing roughly 3000 steps at lr 1e-4
+    before the gate opens far enough for the branch to learn.
+
+    0.5 (tanh -> 0.46) is the default because the intended init is GR00T-N1.7-3B, which
+    builds the WHOLE perception head fresh — there is no trained head stream to protect,
+    so the only thing the gate buys is not swamping the backbone's pretrained layer-12
+    features with a random projection. Lower it toward 0 only when warm-starting from an
+    already-trained perception checkpoint, where the head's own weights are worth
+    protecting from a randomly-initialised branch."""
+
     def __init__(self, **kwargs):
         # Defining __init__ here stops @dataclass from generating one; the parent
         # __init__ handles PretrainedConfig setup and fills dataclass-field

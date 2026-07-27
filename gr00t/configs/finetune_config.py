@@ -271,6 +271,15 @@ class _PerceptionCommonConfig:
     wall_normal_loss_weight: float = 0.1
     """Weight of the wall-normal loss (0 disables the wall-normal output)."""
 
+    # --- Language conditioning ---
+    use_text_conditioning: bool = True
+    """Let the perception head cross-attend over the instruction tokens.
+
+    Mandatory on multi-target datasets (several candidate squares in frame, the
+    instruction picks one): the causal backbone puts the whole image block before the
+    instruction, so without this the head cannot see the instruction at all. Pass
+    --no-use-text-conditioning to reproduce the old language-blind behaviour."""
+
     # --- Image Resolution ---
     image_target_size: int = 720
     """Square edge (px) the wrist image is resized to before the VLM. Native wrist

@@ -63,12 +63,48 @@ class TargetPerceptionHead(nn.Module):
         use_depth: bool,
         use_normal: bool,
         num_attn_heads: int = 8,
+        use_text_conditioning: bool = False,
+        text_attn_heads: int = 8,
+        text_gate_init: float = 0.1,
     ):
         super().__init__()
         self.use_depth = use_depth
         self.use_normal = use_normal
+        self.use_text_conditioning = use_text_conditioning
 
         self.token_norm = nn.LayerNorm(latent_dim)
+
+        # Language conditioning. Each image token cross-attends over the instruction
+        # tokens before ANY output is produced, so both the per-token heatmap and the
+        # pooled visibility/depth/normal branch become instruction-dependent.
+        #
+        # Needed because the backbone cannot supply this: its language model is causal
+        # and the prompt is `<image><instruction>`, so the whole image block precedes
+        # the instruction and no image token can attend to it. Without this the head is
+        # provably language-blind, which is only harmless on a single-task dataset.
+        #
+        # The residual is scaled by a learned scalar gate (tanh(g)), so the model can
+        # regulate how much the branch perturbs the feature stream (cf. ReZero /
+        # Flamingo). text_gate_init trades warm-up cost against init safety:
+        #
+        #   g=0    exactly reproduces the unconditioned head at init, but the branch is
+        #          then INERT — its gradient is scaled by tanh(g)=0, so only the gate
+        #          learns at first. Measured: grad|gate|=4.6e-1 vs grad|cross_attn|=1.6e-30.
+        #          Under Adam at lr 1e-4 the gate moves ~1e-4/step, so reaching a
+        #          meaningful tanh(g)~0.3 burns ~3000 steps before the branch trains.
+        #   g>0    both learn from step 1, at the cost of perturbing the features at init.
+        #
+        # 0.1 is a middle default. Note the safety argument for g=0 only applies when
+        # warm-starting from a checkpoint whose head is already trained: initialising
+        # from nvidia/GR00T-N1.7-3B builds the WHOLE head fresh, so there is no
+        # pretrained head stream to protect and a larger gate is strictly better.
+        self.text_gate_init = text_gate_init
+        if use_text_conditioning:
+            self.text_norm = nn.LayerNorm(latent_dim)
+            self.text_cross_attn = nn.MultiheadAttention(
+                latent_dim, text_attn_heads, batch_first=True
+            )
+            self.text_gate = nn.Parameter(torch.full((1,), float(text_gate_init)))
         # 3 outputs per token: heatmap logit, du, dv (cell units, centered).
         self.token_mlp = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
@@ -99,10 +135,37 @@ class TargetPerceptionHead(nn.Module):
         for module in list(self.token_mlp) + list(self.global_mlp):
             if isinstance(module, nn.Linear):
                 module.reset_parameters()
+        if self.use_text_conditioning:
+            self.text_norm.reset_parameters()
+            self.text_cross_attn._reset_parameters()
+            with torch.no_grad():
+                self.text_gate.fill_(float(self.text_gate_init))
 
-    def forward(self, image_tokens: torch.Tensor) -> dict[str, torch.Tensor]:
-        """image_tokens: (B, N, D) in raster order of the (gh, gw) token grid."""
+    def forward(
+        self,
+        image_tokens: torch.Tensor,
+        text_tokens: torch.Tensor | None = None,
+        text_padding_mask: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """image_tokens: (B, N, D) in raster order of the (gh, gw) token grid.
+
+        text_tokens: (B, L, D) instruction tokens from text_token_sequence(), required
+            when use_text_conditioning is set. text_padding_mask: (B, L), True = padding.
+        """
         tokens = self.token_norm(image_tokens)
+
+        if self.use_text_conditioning:
+            assert text_tokens is not None, (
+                "TargetPerceptionHead was built with use_text_conditioning=True but "
+                "forward() got text_tokens=None — the head would silently fall back to "
+                "being language-blind. Pass the output of text_token_sequence()."
+            )
+            text = self.text_norm(text_tokens.to(tokens.dtype))
+            context, _ = self.text_cross_attn(
+                tokens, text, text, key_padding_mask=text_padding_mask, need_weights=False
+            )
+            tokens = tokens + torch.tanh(self.text_gate).to(tokens.dtype) * context
+
         per_token = self.token_mlp(tokens)  # (B, N, 3)
         heat_logits = per_token[..., 0]
         offsets = per_token[..., 1:3]
@@ -156,6 +219,50 @@ def image_token_grid(
     )
     image_tokens = vl_embeds[image_mask].view(B, n_tokens, -1)
     return image_tokens, gh, gw
+
+
+def text_token_sequence(
+    vl_embeds: torch.Tensor,
+    image_mask: torch.Tensor,
+    attention_mask: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Gather the NON-image tokens (instruction + chat-template scaffold) into a
+    padded batch, for the head's text cross-attention.
+
+    The backbone's language model is causal and the prompt is `<image><instruction>`,
+    so image tokens never attend to the instruction — the instruction only reaches
+    the head through this path. Lengths vary per sample (different instructions
+    tokenize to different lengths), hence the padding mask.
+
+    Returns:
+        text_tokens: (B, L, D), left-aligned and zero-padded
+        padding_mask: (B, L), True where the slot is padding — nn.MultiheadAttention's
+            `key_padding_mask` convention (True = ignore this key)
+    """
+    B, T, D = vl_embeds.shape
+    text_mask = attention_mask.bool() & ~image_mask.bool()
+    lengths = text_mask.sum(dim=1)
+    L = int(lengths.max().item())
+    if L == 0:
+        # No language at all in the batch: hand back a single zero key so the
+        # attention is well-defined and contributes nothing.
+        zeros = vl_embeds.new_zeros(B, 1, D)
+        return zeros, torch.zeros(B, 1, dtype=torch.bool, device=vl_embeds.device)
+
+    ranks = text_mask.cumsum(dim=1) - 1  # each selected token's index within its row
+    rows = torch.arange(B, device=vl_embeds.device).unsqueeze(1).expand(B, T)
+    text_tokens = vl_embeds.new_zeros(B, L, D)
+    padding_mask = torch.ones(B, L, dtype=torch.bool, device=vl_embeds.device)
+    text_tokens[rows[text_mask], ranks[text_mask]] = vl_embeds[text_mask]
+    padding_mask[rows[text_mask], ranks[text_mask]] = False
+
+    # A row with zero text tokens would be fully masked, and a softmax over an empty
+    # key set yields NaN. Unmask its (zero-valued) first slot instead: attention then
+    # returns a zero context, making the gated residual a no-op for that sample.
+    empty = lengths == 0
+    if bool(empty.any()):
+        padding_mask[empty, 0] = False
+    return text_tokens, padding_mask
 
 
 def decode_uv(
@@ -324,6 +431,9 @@ class Gr00tN1d7Perception(PreTrainedModel):
             use_depth=config.depth_loss_weight > 0,
             use_normal=config.wall_normal_loss_weight > 0,
             num_attn_heads=config.perception_pool_heads,
+            use_text_conditioning=config.use_text_conditioning,
+            text_attn_heads=config.text_attn_heads,
+            text_gate_init=config.text_gate_init,
         )
 
         from .processing_gr00t_n1d7 import Gr00tN1d7DataCollator
@@ -372,14 +482,32 @@ class Gr00tN1d7Perception(PreTrainedModel):
             self._merge_size,
         )
 
+    def _head_inputs(self, backbone_output: BatchFeature, image_grid_thw: torch.Tensor):
+        """(image_tokens, gh, gw, text_tokens, text_padding_mask) for the head.
+
+        text_* are None unless the head was built with text conditioning, so the
+        unconditioned path stays allocation-free.
+        """
+        image_tokens, gh, gw = self._image_token_grid(backbone_output, image_grid_thw)
+        if not self.perception_head.use_text_conditioning:
+            return image_tokens, gh, gw, None, None
+        text_tokens, text_padding_mask = text_token_sequence(
+            backbone_output["backbone_features"],
+            backbone_output["image_mask"],
+            backbone_output["backbone_attention_mask"],
+        )
+        return image_tokens, gh, gw, text_tokens, text_padding_mask
+
     # ------------------------------------------------------------------
     # Forward / loss
     # ------------------------------------------------------------------
     def forward(self, inputs: dict) -> BatchFeature:
         inputs = self.prepare_input(inputs)
         backbone_output = self.backbone(BatchFeature(data=inputs))
-        image_tokens, gh, gw = self._image_token_grid(backbone_output, inputs["image_grid_thw"])
-        head_out = self.perception_head(image_tokens)
+        image_tokens, gh, gw, text_tokens, text_pad = self._head_inputs(
+            backbone_output, inputs["image_grid_thw"]
+        )
+        head_out = self.perception_head(image_tokens, text_tokens, text_pad)
 
         outputs = perception_losses(
             self.config,
@@ -393,6 +521,17 @@ class Gr00tN1d7Perception(PreTrainedModel):
         # For this model the perception loss IS the training loss; drop the alias
         # so wandb does not log the same number under two names.
         outputs["loss"] = outputs.pop("perception_loss")
+
+        if self.perception_head.use_text_conditioning:
+            # tanh(gate), i.e. the ACTUAL multiplier on the language branch — not the
+            # raw parameter. Flat near its init means the head is not using the
+            # instruction, which is visible within a few hundred steps instead of
+            # having to be inferred from a bad final uv_err_px_metric.
+            # The trainer auto-logs any 0-dim output whose name ends in _metric.
+            with torch.no_grad():
+                outputs["text_gate_metric"] = torch.tanh(
+                    self.perception_head.text_gate.detach()
+                ).squeeze()
 
         # Plain dict (not BatchFeature): HF Trainer's compute_loss requires a dict
         # subclass to index outputs["loss"].
@@ -426,8 +565,10 @@ class Gr00tN1d7Perception(PreTrainedModel):
         """
         inputs = self.prepare_input(inputs)
         backbone_output = self.backbone(BatchFeature(data=inputs))
-        image_tokens, gh, gw = self._image_token_grid(backbone_output, inputs["image_grid_thw"])
-        head_out = self.perception_head(image_tokens)
+        image_tokens, gh, gw, text_tokens, text_pad = self._head_inputs(
+            backbone_output, inputs["image_grid_thw"]
+        )
+        head_out = self.perception_head(image_tokens, text_tokens, text_pad)
 
         heat_logits = head_out["heat_logits"].float()
         offsets = head_out["offsets"].float()
