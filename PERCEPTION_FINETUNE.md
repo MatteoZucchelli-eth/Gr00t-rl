@@ -81,6 +81,22 @@ RUN_NAME=perception_scratch BASE_MODEL_PATH=scratch sbatch submit_perception_eul
 A new `RUN_NAME` (→ empty output dir) alone already means a fresh run that trains
 from step 0; `BASE_MODEL_PATH=scratch` additionally drops the GR00T-N1.7-3B overlay.
 
+**After a model change you must bump `RUN_NAME`.** Reusing a name auto-resumes the
+last checkpoint in its output dir, and a checkpoint written before the change lacks
+the new parameters (e.g. the head's `text_*` cross-attention added by
+`--use-text-conditioning`), so DeepSpeed's strict state-dict load dies with a
+missing-keys error. Carry the old weights over as a warm start instead — matching
+parameters load, new modules keep their initialization:
+
+```bash
+RUN_NAME=perception_v2 \
+  BASE_MODEL_PATH=/groot/runs/perception_v1/checkpoint-<step> \
+  bash start_finetune_perception.sh
+```
+
+That restarts at step 0 with a fresh optimizer and LR schedule, which is what you want
+anyway: the old ones were built for the old architecture.
+
 ### The dataset is NOT pre-cut — fine-phase selection happens at train time
 
 The `g1_dataset/data/**.parquet` (and the videos) are **full episodes** (~900 frames each,
