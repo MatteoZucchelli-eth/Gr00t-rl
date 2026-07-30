@@ -73,25 +73,48 @@ class FinetuneConfig:
     """Overall multiplier on the tip-target loss (pos + rot terms) when added to the action loss
     (only used if use_tip_target_head)."""
 
+    tip_target_loss_type: str = "mse"
+    """Tip-target objective. "mse" (default): one plain MSE over the whole scaled 9d vector --
+    the original objective and the only one measured to work. "rel_abs": position error
+    normalized by the distance to target plus an absolute anchor. rel_abs is MEASURED WORSE
+    (5.7x worse mean position error in-distribution, predicted-distance regression slope 0.82
+    vs 1.02, -98 mm bias beyond 30 cm): dividing by distance makes far-range error nearly free
+    so the model shrinks its range toward the near-field mean, and below tip_target_dist_floor
+    the relative term is just absolute error times a constant, so it buys nothing up close
+    either. Kept only so the comparison stays reproducible."""
+
     tip_target_pos_loss_weight: float = 1.0
-    """Weight of the position term: squared xyz error normalized by the distance to the target
-    (clamped to tip_target_dist_floor), plus an absolute anchor (see tip_target_pos_abs_weight).
-    The relative part gives close-range frames as much gradient as far ones -- plain MSE would
-    spend nearly all gradient on far, coarse frames."""
+    """Weight of the position term. Applies to tip_target_loss_type="rel_abs" ONLY; inert
+    under "mse"."""
 
     tip_target_pos_abs_weight: float = 0.2
-    """Weight of the absolute (scaled-space MSE) anchor inside the position term. Required: a
-    purely relative loss caps far-range error cost at ~1 per frame, making 'always predict the
-    close-range mean' a cheap constant minimizer (observed collapse). Raise to prioritize
-    far-range fidelity, lower (not to 0) to prioritize close-range precision."""
+    """Weight of the absolute (scaled-space MSE) anchor inside the position term. Applies to
+    tip_target_loss_type="rel_abs" ONLY; inert under "mse"."""
 
     tip_target_rot_loss_weight: float = 1.0
-    """Weight of the rotation term: plain MSE on the raw rot6d part of the prediction."""
+    """Weight of the rotation term (plain MSE on the raw rot6d part). Applies to
+    tip_target_loss_type="rel_abs" ONLY; inert under "mse", where rot6d instead gets 2x the
+    weight of xyz by virtue of occupying 6 of the 9 averaged dims."""
 
     tip_target_dist_floor: float = 0.05
-    """Distance floor (metres) for the position-loss normalization. Below this distance the
-    divisor stops shrinking, so the loss does not blow up as the tip reaches the target. Also
-    bounds how much extra weight close frames get vs far ones ((far/floor)^2)."""
+    """Distance floor (metres) for the position-loss normalization. Applies to
+    tip_target_loss_type="rel_abs" ONLY; inert under "mse"."""
+
+    tip_target_pool: str = "attn"
+    """How the variable-length vision-language token sequence is collapsed into the single
+    vector fed to the head's predictor MLP. "attn" (default): `tip_target_num_queries` learned
+    query tokens cross-attend over the whole sequence, so the head can focus on the patches
+    containing the target and on the text tokens that name it. "mean": masked mean over all
+    tokens. These give the predictor different input widths (num_queries*latent_dim vs
+    latent_dim), so the two are NOT weight-compatible -- a checkpoint trained with one cannot
+    be resumed with the other."""
+
+    tip_target_num_queries: int = 4
+    """Number of learned query tokens for tip_target_pool="attn" (inert under "mean")."""
+
+    tip_target_attn_heads: int = 8
+    """Attention heads of the pooling cross-attention for tip_target_pool="attn" (inert under
+    "mean")."""
 
     use_tip_target_conditioning: bool = True
     """If True, feed the tip-target 9d back as a conditioning token to the action head.

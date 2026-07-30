@@ -74,9 +74,13 @@ class TipTargetHead(nn.Module):
     at inference.
 
     `pool="mean"` selects the original masked-mean pooling (no learned queries,
-    predictor takes a single `latent_dim` vector). It exists purely so that
-    checkpoints trained before the attention pooling landed still load; new
-    training should stay on the default `pool="attn"`.
+    predictor takes a single `latent_dim` vector instead of
+    `num_queries * latent_dim`). Both modes are supported and selectable with
+    `--tip-target-pool`; which one is actually better here is untested -- the
+    only checkpoint trained with "mean" differed from the "attn" one in the loss
+    as well, so the comparison was confounded. Note the predictor input widths
+    differ, so a checkpoint trained with one pool cannot be resumed with the
+    other.
     """
 
     def __init__(
@@ -240,6 +244,12 @@ class Gr00tN1d7ActionHead(nn.Module):
         self.use_tip_target_head = getattr(config, "use_tip_target_head", False)
         if self.use_tip_target_head:
             self.tip_target_loss_weight = config.tip_target_loss_weight
+            self.tip_target_loss_type = getattr(config, "tip_target_loss_type", "mse")
+            if self.tip_target_loss_type not in ("mse", "rel_abs"):
+                raise ValueError(
+                    "tip_target_loss_type must be 'mse' or 'rel_abs', "
+                    f"got {self.tip_target_loss_type!r}"
+                )
             self.tip_target_pos_loss_weight = getattr(config, "tip_target_pos_loss_weight", 1.0)
             self.tip_target_pos_abs_weight = getattr(config, "tip_target_pos_abs_weight", 0.2)
             self.tip_target_rot_loss_weight = getattr(config, "tip_target_rot_loss_weight", 1.0)
@@ -481,16 +491,14 @@ class Gr00tN1d7ActionHead(nn.Module):
             "state_features": state_features,
         }
 
-        # Tip-target head: two terms over rows with a resolved label.
-        #   pos: squared xyz error in metres, divided by the (clamped) distance to
-        #        the target -- relative error, so close-range frames get as much
-        #        gradient as far ones instead of being drowned out by them --
-        #        PLUS an absolute (scaled-space) MSE anchor. The anchor is
-        #        essential: a purely relative loss caps the cost of far-range
-        #        errors at ~1 per frame, which makes "always predict the
-        #        close-range mean" a cheap constant minimizer (observed
-        #        collapse). The absolute term makes that constant expensive.
-        #   rot: plain MSE on the raw rot6d part (unit scale, already accurate).
+        # Tip-target head loss over rows with a resolved label. Two objectives,
+        # selected by `tip_target_loss_type` (see the model config for the
+        # measurements behind the default):
+        #   "mse":     one plain MSE over the whole scaled 9d vector.
+        #   "rel_abs": xyz error normalized by the (clamped) distance to target
+        #              plus an absolute anchor, and a separate rot6d MSE.
+        # The per-part MSEs are always logged as diagnostics so the two
+        # objectives stay comparable on the same wandb panels.
         if self.use_tip_target_head and tip_pred_scaled is not None:
             outputs["tip_target_pred"] = self.tip_target_head.unscale(
                 tip_pred_scaled, orthonormalize=True
@@ -499,22 +507,33 @@ class Gr00tN1d7ActionHead(nn.Module):
                 valid_rows = tip_valid.squeeze(-1)
                 pred_v = tip_pred_scaled[valid_rows]
                 tgt_v = tip_target_scaled[valid_rows]
-                xyz_scale = self.tip_target_head.xyz_scale
-                xyz_residual_m = (pred_v[:, :3] - tgt_v[:, :3]) * xyz_scale
-                dist_m = torch.linalg.vector_norm(tgt_v[:, :3] * xyz_scale, dim=-1, keepdim=True)
-                rel_residual = xyz_residual_m / dist_m.clamp_min(self.tip_target_dist_floor)
-                tip_pos_rel_loss = rel_residual.pow(2).mean()
                 tip_pos_abs_loss = F.mse_loss(pred_v[:, :3], tgt_v[:, :3])
-                tip_pos_loss = tip_pos_rel_loss + self.tip_target_pos_abs_weight * tip_pos_abs_loss
                 tip_rot_loss = F.mse_loss(pred_v[:, 3:], tgt_v[:, 3:])
-                tip_target_loss = (
-                    self.tip_target_pos_loss_weight * tip_pos_loss
-                    + self.tip_target_rot_loss_weight * tip_rot_loss
-                )
-                outputs["tip_target_pos_loss"] = tip_pos_loss
-                outputs["tip_target_pos_rel_loss"] = tip_pos_rel_loss
                 outputs["tip_target_pos_abs_loss"] = tip_pos_abs_loss
                 outputs["tip_target_rot_loss"] = tip_rot_loss
+
+                if self.tip_target_loss_type == "mse":
+                    # Single MSE over all 9 dims. NOT the same as summing the two
+                    # per-part MSEs above: averaging over 9 dims weights rot6d
+                    # (6 dims) twice as much as xyz (3 dims).
+                    tip_target_loss = F.mse_loss(pred_v, tgt_v)
+                else:
+                    xyz_scale = self.tip_target_head.xyz_scale
+                    xyz_residual_m = (pred_v[:, :3] - tgt_v[:, :3]) * xyz_scale
+                    dist_m = torch.linalg.vector_norm(
+                        tgt_v[:, :3] * xyz_scale, dim=-1, keepdim=True
+                    )
+                    rel_residual = xyz_residual_m / dist_m.clamp_min(self.tip_target_dist_floor)
+                    tip_pos_rel_loss = rel_residual.pow(2).mean()
+                    tip_pos_loss = (
+                        tip_pos_rel_loss + self.tip_target_pos_abs_weight * tip_pos_abs_loss
+                    )
+                    tip_target_loss = (
+                        self.tip_target_pos_loss_weight * tip_pos_loss
+                        + self.tip_target_rot_loss_weight * tip_rot_loss
+                    )
+                    outputs["tip_target_pos_loss"] = tip_pos_loss
+                    outputs["tip_target_pos_rel_loss"] = tip_pos_rel_loss
                 outputs["tip_target_loss"] = tip_target_loss
                 outputs["loss"] = outputs["loss"] + self.tip_target_loss_weight * tip_target_loss
 

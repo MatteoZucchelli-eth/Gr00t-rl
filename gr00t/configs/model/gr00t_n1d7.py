@@ -129,19 +129,35 @@ class Gr00tN1d7Config(PretrainedConfig):
     # end-effector (drill-tip) frame as xyz(3) + rot6d(6) (the
     # `next.tip_target_9d` column in the parquet). xyz is divided by
     # `tip_target_xyz_scale` inside the head; the distance to target is derived
-    # as ||xyz|| rather than regressed separately. The loss has two terms:
-    #   pos: squared error on metric xyz, normalized by the distance to the
-    #        target clamped to `tip_target_dist_floor` -- so a 10% error costs
-    #        the same near and far, instead of far frames dominating.
-    #   rot: plain MSE on raw rot6d, orthonormalized (Gram-Schmidt) only at
-    #        inference (Zhou et al., CVPR 2019).
+    # as ||xyz|| rather than regressed separately. rot6d is orthonormalized
+    # (Gram-Schmidt) only at inference (Zhou et al., CVPR 2019).
+    #
+    # `tip_target_loss_type` selects the objective:
+    #   "mse" (default): a single plain MSE over the whole scaled 9d vector.
+    #        Because it averages over 9 dims, rot6d (6 dims) carries 2x the
+    #        weight of xyz (3 dims). This is the original objective, and the
+    #        only one measured to work -- see the comparison in
+    #        `scripts/eval/compare_tip_target_heads.py`.
+    #   "rel_abs": distance-normalized position term (clamped at
+    #        `tip_target_dist_floor`) plus an absolute anchor, with separate
+    #        pos/rot weights. Kept for reproducibility only. MEASURED WORSE:
+    #        dividing by distance makes far-range error ~free, so the model
+    #        shrinks its predicted range toward the near-field mean (regression
+    #        slope 0.82 vs 1.02, -98 mm bias beyond 30 cm, 5.7x worse mean
+    #        position error in-distribution). Below `tip_target_dist_floor` the
+    #        relative term is just absolute error times a constant, so it buys
+    #        nothing in the fine phase either.
+    # tip_target_pos_loss_weight / tip_target_pos_abs_weight /
+    # tip_target_rot_loss_weight / tip_target_dist_floor apply ONLY to
+    # "rel_abs" and are inert under "mse".
     # Conditioning is taught by teacher forcing: training conditions on the
     # ground-truth 9d (plus small noise), inference on the head's own
     # prediction. Frames with NaN labels are excluded from
     # the loss and conditioned on the (detached) prediction instead.
     use_tip_target_head: bool = False
     tip_target_loss_weight: float = 0.5  # overall multiplier vs the action loss
-    tip_target_pos_loss_weight: float = 1.0  # weight of the combined xyz term
+    tip_target_loss_type: str = "mse"  # "mse" (plain, default) or "rel_abs" (measured worse)
+    tip_target_pos_loss_weight: float = 1.0  # weight of the combined xyz term ("rel_abs" only)
     tip_target_pos_abs_weight: float = 0.2  # absolute (scaled MSE) anchor inside the xyz term
     tip_target_rot_loss_weight: float = 1.0  # weight of the rot6d MSE term
     tip_target_dist_floor: float = 0.05  # metres; distance clamp for the pos normalization

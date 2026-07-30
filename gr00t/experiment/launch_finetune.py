@@ -104,6 +104,10 @@ if __name__ == "__main__":
     # Optional tip-target head.
     config.model.use_tip_target_head = ft_config.use_tip_target_head
     config.model.tip_target_loss_weight = ft_config.tip_target_loss_weight
+    config.model.tip_target_loss_type = ft_config.tip_target_loss_type
+    config.model.tip_target_pool = ft_config.tip_target_pool
+    config.model.tip_target_num_queries = ft_config.tip_target_num_queries
+    config.model.tip_target_attn_heads = ft_config.tip_target_attn_heads
     config.model.tip_target_pos_loss_weight = ft_config.tip_target_pos_loss_weight
     config.model.tip_target_pos_abs_weight = ft_config.tip_target_pos_abs_weight
     config.model.tip_target_rot_loss_weight = ft_config.tip_target_rot_loss_weight
