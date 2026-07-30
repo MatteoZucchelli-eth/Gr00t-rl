@@ -44,7 +44,7 @@ mkdir -p "$GROOT_HOME/cache/checkpoints/groot"
 mkdir -p "$GROOT_HOME/data/"
 
 # --- 3. Verify dataset is available (bind-mounted from host as /workspace/g1_dataset_small_general) ---
-DATASET_DIR="${DATASET_DIR:-$PROJECT_DIR/g1_dataset_small_general}"
+DATASET_DIR="${DATASET_DIR:-$PROJECT_DIR/g1_dataset_red_2k}"
 export DATASET_DIR  # start_finetune.sh honours it
 export DATASET_DIR
 

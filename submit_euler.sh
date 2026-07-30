@@ -49,7 +49,7 @@
 #
 #        # Sync the dataset directly to the high-capacity work directory.
 #        # The trailing target name must match DATASET_HOST_DIR below.
-#        rsync -avP g1_dataset_small_general/ euler:/cluster/work/mrl/$USER/datasets/g1_dataset_small_general/
+#        rsync -avP g1_dataset_red_2k/ euler:/cluster/work/mrl/$USER/datasets/g1_dataset_red_2k/
 #
 #   4. One-time setup on Euler (run once after first transfer):
 #        mkdir -p /cluster/work/mrl/$USER/containers
@@ -72,7 +72,7 @@ PROJECT_DIR="$HOME/groot"
 CONTAINER_TAR="/cluster/work/mrl/$USER/containers/groot-environment.tar.gz"
 GROOT_DIR="/cluster/scratch/$USER/groot"
 RESULTS_DIR="/cluster/project/mrl/$USER/results/groot/$SLURM_JOB_ID"
-DATASET_HOST_DIR="${DATASET_HOST_DIR:-/cluster/work/mrl/$USER/datasets/g1_dataset_small_general}"
+DATASET_HOST_DIR="${DATASET_HOST_DIR:-/cluster/work/mrl/$USER/datasets/g1_dataset_red_2k}"
 
 # --- Job info ---
 echo "=== groot Finetune Job ==="
@@ -100,7 +100,7 @@ time tar -xzf "$CONTAINER_TAR" -C "$TMPDIR"
 # generate_stats/generate_rel_stats scans all parquet files on rank 0 before the NCCL
 # barrier — on Lustre this takes ~4.5 s/file (~10 min for 131 files), exceeding the
 # 600 s barrier timeout.  Reading from local NVMe reduces this to <10 s total.
-DATASET_LOCAL_DIR="$TMPDIR/g1_dataset_small_general"
+DATASET_LOCAL_DIR="$TMPDIR/g1_dataset_red_2k"
 echo "[euler] Rsyncing dataset to local scratch (${DATASET_LOCAL_DIR})..."
 time rsync -a --info=progress2 "$DATASET_HOST_DIR/" "$DATASET_LOCAL_DIR/"
 echo "[euler] Dataset copy done."
@@ -121,7 +121,7 @@ time apptainer exec --nv \
     --bind "$PROJECT_DIR/setup_and_train.sh:/workspace/setup_and_train.sh" \
     --bind "$PROJECT_DIR/start_finetune.sh:/workspace/start_finetune.sh" \
     --bind "$PROJECT_DIR/register_new_modality.py:/workspace/register_new_modality.py" \
-    --bind "$DATASET_LOCAL_DIR:/workspace/g1_dataset_small_general" \
+    --bind "$DATASET_LOCAL_DIR:/workspace/g1_dataset_red_2k" \
     --env TRITON_CACHE_DIR=/groot/cache/triton \
     --env TORCH_EXTENSIONS_DIR=/groot/cache/torch_kernels \
     --env XDG_CACHE_HOME=/groot/cache \
