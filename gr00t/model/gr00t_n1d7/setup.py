@@ -89,6 +89,15 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 state_dropout_prob=self.config.model.state_dropout_prob,
                 backbone_trainable_params_fp32=self.config.model.backbone_trainable_params_fp32,
                 load_bf16=self.config.model.load_bf16,
+                # Without this the model keeps the BASE checkpoint's action_horizon
+                # (40 for GR00T-N1.7-3B) while the processor and dataset use
+                # config.model.action_horizon. Training takes its trajectory length from
+                # the batch, so it trains on the processor's horizon, but
+                # get_action samples noise of config.action_horizon -- so the DiT would
+                # roll out 40 steps having only ever seen length-30 sequences. No
+                # parameter is sized by action_horizon (verified: identical state-dict
+                # shapes at 30 and 40), so this only aligns the rollout length.
+                action_horizon=self.config.model.action_horizon,
                 use_tip_target_head=self.config.model.use_tip_target_head,
                 tip_target_loss_weight=self.config.model.tip_target_loss_weight,
                 tip_target_loss_type=self.config.model.tip_target_loss_type,
@@ -166,6 +175,14 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 transformers_loading_kwargs=self.transformers_loading_kwargs,
             )
 
+        # Surface the horizon that actually reached the model: it silently inherited the
+        # base checkpoint's value until 2026-07-30, and a train/inference mismatch here
+        # is invisible in the loss.
+        logging.info(
+            f"[action-horizon] model action_horizon={model.config.action_horizon} "
+            f"(requested {self.config.model.action_horizon}); the dataset chunk length "
+            "comes from the modality config's action delta_indices and must match"
+        )
         logging.debug(f"Model Config: {model.config}")
         if get_rank() == 0:
             with open(self.save_cfg_dir / "final_model_config.json", "w") as f:
