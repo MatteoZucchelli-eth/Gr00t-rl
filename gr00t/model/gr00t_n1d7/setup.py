@@ -248,6 +248,31 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 transformers_loading_kwargs=self.transformers_loading_kwargs,
             )
 
+        # Log the EFFECTIVE image geometry at INFO. These four interact by precedence
+        # (shortest_image_edge beats image_target_size, crop_fraction beats
+        # image_crop_size) and used to be silently dropped on the way here, so every
+        # run trained at the base checkpoint's resolution whatever was requested. Print
+        # what the processor actually ended up with, not what was asked for.
+        _target = getattr(processor, "image_target_size", None)
+        _crop = getattr(processor, "image_crop_size", None)
+        _edge = getattr(processor, "shortest_image_edge", None)
+        _frac = getattr(processor, "crop_fraction", None)
+        _resize_to = _edge if _edge is not None else (_target[0] if _target else None)
+        _crop_frac = _frac if _frac is not None else (_crop[0] / _target[0] if _crop else None)
+        logging.info(
+            "[resolution] EFFECTIVE image geometry: "
+            f"image_target_size={_target} image_crop_size={_crop} "
+            f"shortest_image_edge={_edge} crop_fraction={_frac}"
+        )
+        if _resize_to is not None:
+            # Backbone patches are 16 px with spatial_merge_size 2, so one visual token
+            # covers a 32 px block of the resized image.
+            _tokens = (_resize_to // 32) ** 2
+            logging.info(
+                f"[resolution] every input image becomes {_resize_to}x{_resize_to} "
+                f"(crop fraction {_crop_frac:.3f} of the frame, then resized back up) "
+                f"=> ~{_tokens} visual tokens per image"
+            )
         logging.debug(
             f"Processor configs for training: {json.dumps({k: str(v) for k, v in vars(processor).items()}, indent=2)}"
         )

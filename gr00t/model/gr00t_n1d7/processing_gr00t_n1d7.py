@@ -761,6 +761,8 @@ class Gr00tN1d7Processor(BaseProcessor):
 
         # Directly override other processor kwargs
         if kwargs:
+            # Recorded before the pops below, for the precedence check at the end.
+            kwargs_seen = set(kwargs)
             # Override modality configs while keeping pretrained embodiment configs
             modality_configs = kwargs.pop("modality_configs", {})
             for embodiment_tag, modality_config in modality_configs.items():
@@ -777,12 +779,41 @@ class Gr00tN1d7Processor(BaseProcessor):
                 "max_action_horizon",
                 "max_state_dim",
                 "max_action_dim",
+                "image_target_size",
+                "image_crop_size",
+            ]
+            # Keys where None is a MEANINGFUL override rather than "not supplied":
+            # build_image_transformations_albumentations prefers shortest_image_edge
+            # over image_target_size and crop_fraction over image_crop_size, using the
+            # latter only when the former is None. So an image_target_size override is
+            # inert unless shortest_image_edge is explicitly cleared -- which the
+            # skip-None rule below would otherwise silently drop.
+            nullable_override_keys = [
+                "shortest_image_edge",
+                "crop_fraction",
             ]
             for key in override_keys:
                 if key in kwargs:
                     override = kwargs.pop(key)
                     if override is not None:
                         processor_kwargs[key] = override
+            for key in nullable_override_keys:
+                if key in kwargs:
+                    processor_kwargs[key] = kwargs.pop(key)
+
+            # Loudly reject the silent no-op: overriding the target/crop size while the
+            # pretrained shortest-edge path is still active changes nothing.
+            for size_key, wins_key in (
+                ("image_target_size", "shortest_image_edge"),
+                ("image_crop_size", "crop_fraction"),
+            ):
+                if size_key in kwargs_seen and processor_kwargs.get(wins_key) is not None:
+                    raise ValueError(
+                        f"{size_key} was overridden but {wins_key}="
+                        f"{processor_kwargs[wins_key]!r} takes precedence, so the override "
+                        f"would be silently ignored. Pass {wins_key}=None alongside "
+                        f"{size_key} to select the fixed-size resize path."
+                    )
         return cls(**processor_kwargs, transformers_loading_kwargs=transformers_loading_kwargs)
 
 
