@@ -217,7 +217,20 @@ class FinetuneConfig:
     """
 
     max_steps: int = 10000
-    """Total number of training steps to run before stopping."""
+    """Total number of optimizer steps to run before stopping. Ignored when num_epochs is set."""
+
+    num_epochs: float | None = None
+    """If set, derive max_steps from the dataset size instead of specifying it directly:
+    max_steps = ceil(num_epochs * trainable_steps / (global_batch_size * gradient_accumulation_steps)),
+    where trainable_steps counts the timesteps that can start a full action chunk
+    (sum over episodes of length - action_horizon + 1, read from meta/episodes.jsonl).
+    Fractional values are allowed (0.5 = half a pass).
+
+    CAVEAT: this is a sample-count target, not a true pass over the data. The training
+    iterator draws batches from a shard buffer with replacement, so after "1 epoch" some
+    frames have been seen several times and others not at all -- read it as "each frame
+    seen num_epochs times in expectation". Note also that warmup_ratio is a fraction of
+    max_steps and so scales automatically, but save_steps is absolute and does not."""
 
     weight_decay: float = 1e-5
     """Weight decay coefficient for optimizer (L2 regularization)."""

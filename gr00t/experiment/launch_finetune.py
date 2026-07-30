@@ -17,6 +17,7 @@
 # This script tries to provide a similar user experience as current OSS.
 
 import json
+import math
 import os
 from pathlib import Path
 
@@ -39,6 +40,70 @@ def load_modality_config(modality_config_path: str):
         print(f"Loaded modality config: {path}")
     else:
         raise FileNotFoundError(f"Modality config path does not exist: {modality_config_path}")
+
+
+def count_trainable_steps(dataset_path: str, action_horizon: int) -> int:
+    """Number of timesteps eligible to start an action chunk, across the dataset.
+
+    Mirrors ShardedSingleStepDataset.get_effective_episode_length: the last
+    `action_horizon - 1` frames of an episode cannot start a full chunk. Reads only
+    meta/episodes.jsonl (no parquet), so this is cheap enough to run at launch.
+    """
+    episodes_file = Path(dataset_path) / "meta" / "episodes.jsonl"
+    if not episodes_file.exists():
+        raise FileNotFoundError(
+            f"Cannot derive max_steps from --num-epochs: {episodes_file} not found. "
+            "Pass --max-steps instead."
+        )
+    with open(episodes_file, "r") as f:
+        lengths = [json.loads(line)["length"] for line in f if line.strip()]
+    return sum(max(0, length - action_horizon + 1) for length in lengths)
+
+
+def resolve_action_horizon(embodiment_tag: str) -> int:
+    """Chunk length the dataset uses, from the registered modality config.
+
+    Must match ShardedSingleStepDataset, which derives it from the action modality's
+    delta indices (NOT from model.action_horizon, which can differ -- the processor
+    pads to the model's value).
+    """
+    from gr00t.configs.data.embodiment_configs import MODALITY_CONFIGS
+
+    delta_indices = MODALITY_CONFIGS[embodiment_tag]["action"].delta_indices
+    return max(delta_indices) - min(delta_indices) + 1
+
+
+def resolve_max_steps(ft_config, embodiment_tag: str) -> int:
+    """max_steps from --num-epochs when given, else --max-steps verbatim.
+
+    One "epoch" is a target expressed in samples: num_epochs * trainable_steps
+    consumed in total. It is NOT a pass over the data -- the training iterator draws
+    batches from a shard buffer with replacement (see trainer._PrefetchIterator), so
+    some frames are visited several times before others are visited once. Read it as
+    "each frame seen num_epochs times in expectation".
+    """
+    if ft_config.num_epochs is None:
+        return ft_config.max_steps
+    if ft_config.num_epochs <= 0:
+        raise ValueError(f"--num-epochs must be > 0, got {ft_config.num_epochs}")
+
+    action_horizon = resolve_action_horizon(embodiment_tag)
+    trainable = count_trainable_steps(ft_config.dataset_path, action_horizon)
+    per_step = ft_config.global_batch_size * ft_config.gradient_accumulation_steps
+    steps = math.ceil(ft_config.num_epochs * trainable / per_step)
+    print(
+        f"[epochs] {ft_config.num_epochs} epoch(s) over {trainable:,} trainable steps "
+        f"(action_horizon {action_horizon}) "
+        f"at {per_step} samples/optimizer step (global_batch_size "
+        f"{ft_config.global_batch_size} x grad_accum {ft_config.gradient_accumulation_steps}) "
+        f"-> --max-steps {steps:,} (overriding {ft_config.max_steps:,})"
+    )
+    if ft_config.save_steps > steps:
+        print(
+            f"[epochs] WARNING: save_steps ({ft_config.save_steps:,}) > max_steps ({steps:,}); "
+            "only the final model would be written."
+        )
+    return steps
 
 
 if __name__ == "__main__":
@@ -127,7 +192,7 @@ if __name__ == "__main__":
     config.training.save_total_limit = ft_config.save_total_limit
     config.training.num_gpus = ft_config.num_gpus
     config.training.use_wandb = ft_config.use_wandb
-    config.training.max_steps = ft_config.max_steps
+    config.training.max_steps = resolve_max_steps(ft_config, embodiment_tag)
     config.training.weight_decay = ft_config.weight_decay
     config.training.warmup_ratio = ft_config.warmup_ratio
     config.training.wandb_project = ft_config.wandb_project
