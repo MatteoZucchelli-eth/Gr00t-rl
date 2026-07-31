@@ -80,6 +80,15 @@ TIP_TARGET_ARGS=""
 # on its own, not alongside another variable, and watch memory: visual tokens scale
 # with area and the batch may need accumulation again.
 
+# Batch. Effective batch = GLOBAL_BATCH_SIZE x GRAD_ACCUM_STEPS, and GLOBAL_BATCH_SIZE
+# is split across the GPUs (32 over 2 GPUs = 16/GPU). Keep the product at 32 when
+# trading one for the other, so the optimizer sees the same thing. Raising the image
+# resolution multiplies visual tokens by (target/256)^2 -- 512px is 4x -- so this is
+# the knob to drop first if a higher-resolution run OOMs:
+#   GLOBAL_BATCH_SIZE=16 GRAD_ACCUM_STEPS=2   (same effective 32, half the activations)
+GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-32}"
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"
+
 # Training length. Set NUM_EPOCHS to size the run by the dataset instead of by a step
 # count: the launcher computes max_steps = ceil(epochs * trainable_steps / effective
 # batch), where trainable_steps = sum(episode_length - action_horizon + 1). For
@@ -94,8 +103,10 @@ NUM_EPOCHS="${NUM_EPOCHS:-}"
 MAX_STEPS="${MAX_STEPS:-10000}"
 if [ -n "$NUM_EPOCHS" ]; then
     TRAIN_LENGTH_ARGS="--num-epochs ${NUM_EPOCHS}"
-    # 810321 trainable steps / 32 per step = 25323 steps per epoch for this dataset.
-    SAVE_STEPS="${SAVE_STEPS:-$(python -c "import math,sys;print(max(200, math.ceil(${NUM_EPOCHS}*25323/5/100)*100))")}"
+    # ~810321 trainable steps for g1_dataset_red_2k; steps/epoch = that / effective batch.
+    # Only a heuristic for checkpoint cadence -- the authoritative max_steps is computed
+    # by launch_finetune.py from the dataset actually being used.
+    SAVE_STEPS="${SAVE_STEPS:-$(python -c "import math;eff=${GLOBAL_BATCH_SIZE}*${GRAD_ACCUM_STEPS};print(max(200, math.ceil(${NUM_EPOCHS}*810321/eff/5/100)*100))")}"
 else
     TRAIN_LENGTH_ARGS="--max-steps ${MAX_STEPS}"
     SAVE_STEPS="${SAVE_STEPS:-2000}"
@@ -120,6 +131,7 @@ echo "[train] DATASET_DIR=${DATASET_DIR}"
 echo "[train] OUTPUT_DIR=${OUTPUT_DIR}"
 echo "[train] MASTER_PORT=${MASTER_PORT}"
 echo "[train] TIP_TARGET_ARGS=${TIP_TARGET_ARGS:-<none>}"
+echo "[train] GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE} GRAD_ACCUM_STEPS=${GRAD_ACCUM_STEPS} (effective $((GLOBAL_BATCH_SIZE*GRAD_ACCUM_STEPS)))"
 echo "[train] IMAGE_TARGET_SIZE=${IMAGE_TARGET_SIZE} IMAGE_CROP_SIZE=${IMAGE_CROP_SIZE}"
 echo "[train]   -> requested crop fraction $(python -c "print(f'{${IMAGE_CROP_SIZE}/${IMAGE_TARGET_SIZE}:.3f}')"), ~$(python -c "print((${IMAGE_TARGET_SIZE}//32)**2)") visual tokens/image"
 echo "[train]   (grep the training log for '[resolution]' to see what the processor ACTUALLY used)"
@@ -151,8 +163,8 @@ torchrun --nproc_per_node=2 --master_port=$MASTER_PORT gr00t/experiment/launch_f
     --save-total-limit 5 \
     --save-steps ${SAVE_STEPS} \
     ${TRAIN_LENGTH_ARGS} \
-    --global-batch-size 32 \
-    --gradient-accumulation-steps 1 \
+    --global-batch-size ${GLOBAL_BATCH_SIZE} \
+    --gradient-accumulation-steps ${GRAD_ACCUM_STEPS} \
     --dataloader-num-workers 4 \
     --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.03 \
     --image-target-size ${IMAGE_TARGET_SIZE} \

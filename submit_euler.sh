@@ -133,6 +133,8 @@ time apptainer exec --nv \
     --env IMAGE_TARGET_SIZE="${IMAGE_TARGET_SIZE:-}" \
     --env IMAGE_CROP_SIZE="${IMAGE_CROP_SIZE:-}" \
     --env DATASET_DIR="${DATASET_DIR:-}" \
+    --env GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-}" \
+    --env GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-}" \
     "$TMPDIR/groot-environment.sif" \
     bash /workspace/setup_and_train.sh
 
