@@ -18,6 +18,9 @@
 #   RUN_NAME=perception_v2 BASE_MODEL_PATH=/groot/runs/red_and_green/checkpoint-10000 \
 #       sbatch submit_perception_euler.sh
 #
+# Retrieving the trained model afterwards (newest weights only; see submit_euler.sh):
+#   scripts/fetch_euler_checkpoint.sh <run-name>
+#
 # Prerequisites: same container image and one-time setup as submit_euler.sh
 # (see its header). Additionally:
 #

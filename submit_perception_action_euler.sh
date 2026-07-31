@@ -18,6 +18,9 @@
 #
 #   RUN_NAME=perception_action_v1 sbatch submit_perception_action_euler.sh
 #
+# Retrieving the trained model afterwards (newest weights only; see submit_euler.sh):
+#   scripts/fetch_euler_checkpoint.sh <run-name>
+#
 #   # Optional: reuse an existing perception head (needs its select_layer):
 #   RUN_NAME=perception_action_reuse \
 #       PERCEPTION_MODEL_PATH=/groot/runs/perceptionv1 SELECT_LAYER=12 \

@@ -51,6 +51,17 @@
 #        # The trailing target name must match DATASET_HOST_DIR below.
 #        rsync -avP g1_dataset_red_2k/ euler:/cluster/work/mrl/$USER/datasets/g1_dataset_red_2k/
 #
+#   RETRIEVING A TRAINED MODEL (after the job finishes):
+#        scripts/fetch_euler_checkpoint.sh <run-name>
+#      Fetches the NEWEST weights only: the final model at the run root if the run
+#      finished, otherwise the highest checkpoint-N. It skips the optimizer/DeepSpeed/
+#      resume state, and KEEPS experiment_cfg/ -- which holds
+#      final_processor_config.json, the only reliable record of the image geometry
+#      the run actually tokenized with. config.json is NOT a substitute for it: it
+#      carries fields inherited from the base checkpoint that the processor
+#      overrode, and the two do disagree. The script prints that geometry after
+#      the transfer and fails if the file is missing.
+#
 #   4. One-time setup on Euler (run once after first transfer):
 #        mkdir -p /cluster/work/mrl/$USER/containers
 #        mkdir -p /cluster/project/mrl/$USER/results/groot
