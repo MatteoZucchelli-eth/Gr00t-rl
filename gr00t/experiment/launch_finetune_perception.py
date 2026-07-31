@@ -25,7 +25,7 @@ from gr00t.configs.base_config import get_default_config
 from gr00t.configs.finetune_config import PerceptionFinetuneConfig
 from gr00t.configs.model.gr00t_n1d7_perception import Gr00tN1d7PerceptionConfig
 from gr00t.experiment.experiment import run
-from gr00t.experiment.launch_finetune import load_modality_config
+from gr00t.experiment.launch_finetune import load_modality_config, resolve_max_steps
 
 
 if __name__ == "__main__":
@@ -83,6 +83,13 @@ if __name__ == "__main__":
     model.image_crop_size = (ft_config.image_crop_size, ft_config.image_crop_size)
     model.shortest_image_edge = None
     model.crop_fraction = None
+    print(
+        f"[resolution] image_target_size={model.image_target_size} "
+        f"image_crop_size={model.image_crop_size} "
+        f"(crop_fraction {ft_config.image_crop_size / ft_config.image_target_size:.3f}); "
+        f"the processor OUTPUT is {ft_config.image_target_size}px -- the crop is a zoom "
+        f"augmentation, it is resized back up"
+    )
     model.color_jitter_params = ft_config.color_jitter_params
     model.random_rotation_angle = None  # would desync the wall-normal label
     model.extra_augmentation_config = None
@@ -109,7 +116,8 @@ if __name__ == "__main__":
     config.training.save_total_limit = ft_config.save_total_limit
     config.training.num_gpus = ft_config.num_gpus
     config.training.use_wandb = ft_config.use_wandb
-    config.training.max_steps = ft_config.max_steps
+    # fine_phase_only=True below, so the epoch is counted over the sidecar labels.
+    config.training.max_steps = resolve_max_steps(ft_config, embodiment_tag, fine_phase_only=True)
     config.training.weight_decay = ft_config.weight_decay
     config.training.warmup_ratio = ft_config.warmup_ratio
     config.training.wandb_project = ft_config.wandb_project

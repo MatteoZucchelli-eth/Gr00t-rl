@@ -344,6 +344,15 @@ class _PerceptionCommonConfig:
     num_gpus: int = 1
     use_wandb: bool = False
     max_steps: int = 10000
+    """Total optimizer steps to run. Ignored when num_epochs is set."""
+
+    num_epochs: float | None = None
+    """If set, derive max_steps from the dataset size instead of specifying it directly.
+    Same meaning and same caveat as FinetuneConfig.num_epochs, with one difference that
+    matters: these finetunes run with fine_phase_only=True, so an "epoch" is counted over
+    the labelled fine-phase frames in the heatmap_labels/ sidecar, NOT over whole
+    episodes. Datasets without that sidecar cannot use num_epochs at all."""
+
     weight_decay: float = 1e-5
     warmup_ratio: float = 0.05
     shard_size: int = 2**10
