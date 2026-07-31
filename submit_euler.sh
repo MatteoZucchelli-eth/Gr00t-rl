@@ -126,6 +126,13 @@ time apptainer exec --nv \
     --env TORCH_EXTENSIONS_DIR=/groot/cache/torch_kernels \
     --env XDG_CACHE_HOME=/groot/cache \
     --env RUN_NAME="${RUN_NAME:-red_and_green}" \
+    --env TIP_TARGET_POOL="${TIP_TARGET_POOL:-}" \
+    --env NUM_EPOCHS="${NUM_EPOCHS:-}" \
+    --env MAX_STEPS="${MAX_STEPS:-}" \
+    --env SAVE_STEPS="${SAVE_STEPS:-}" \
+    --env IMAGE_TARGET_SIZE="${IMAGE_TARGET_SIZE:-}" \
+    --env IMAGE_CROP_SIZE="${IMAGE_CROP_SIZE:-}" \
+    --env DATASET_DIR="${DATASET_DIR:-}" \
     "$TMPDIR/groot-environment.sif" \
     bash /workspace/setup_and_train.sh
 
