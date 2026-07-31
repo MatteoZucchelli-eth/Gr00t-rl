@@ -35,8 +35,12 @@
 #      mounted as /groot, so a finetuned VLA run lives at e.g.
 #      /groot/runs/<run_name>/checkpoint-XXXX. An HF id like
 #      nvidia/GR00T-N1.7-3B also works (downloads via HF_TOKEN from .env).
-#      Prefer one of your --tune-visual 720px VLA checkpoints: its vision
-#      encoder is already adapted to the task (action-head weights are ignored).
+#      Keep the default unless you have a reason not to. Initialising from one of
+#      your own VLA runs used to be the advice, on the assumption they were 720px;
+#      they were not. Until commit a66a334 the processor silently dropped the
+#      resolution overrides, so every VLA run trained at 256px and its vision
+#      encoder is adapted to that, making it a worse init here than the foundation
+#      weights. Check a candidate's [resolution] log line before trusting it.
 # =============================================================================
 
 set -euo pipefail

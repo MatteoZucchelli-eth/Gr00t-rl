@@ -17,8 +17,12 @@ RUN_NAME="${RUN_NAME:-perception_v1}"
 DATASET_DIR="${DATASET_DIR:-./g1_dataset_small_general/}"
 
 # Backbone init. Three choices:
-#   - A finetuned VLA run (best: one trained with --tune-visual at 720px — its
-#     vision encoder is already adapted to the task). Action-head weights ignored.
+#   - A finetuned VLA run. Action-head weights are ignored, only the backbone is
+#     inherited. NOT recommended as of 2026-07-31: every VLA run to date actually
+#     trained at 256px (the resolution overrides were silently dropped until commit
+#     a66a334), so such a checkpoint's vision encoder is adapted to 256px and is a
+#     WORSE init than the foundation weights for a 736px perception run. Revisit
+#     once you have a VLA checkpoint whose logs confirm a matching resolution.
 #   - nvidia/GR00T-N1.7-3B (the GR00T foundation VLA) — the default.
 #   - "scratch" / "none" / "" (empty) — do NOT overlay any VLA checkpoint. The
 #     VLM backbone still starts from the published Cosmos-Reason2-2B foundation
@@ -49,12 +53,17 @@ WALL_NORMAL_LOSS_WEIGHT="${WALL_NORMAL_LOSS_WEIGHT:-0.1}"  # 0 disables the wall
 LEARNING_RATE="${LEARNING_RATE:-1e-4}"
 
 # --- Image resolution ---
-# The wrist frames are natively 720x720, so 720 is 1:1 with the sensor and each
-# Qwen visual token covers 32 native px. IMAGE_CROP_SIZE is NOT the output size:
-# the pipeline crops that fraction and resizes back up to IMAGE_TARGET_SIZE, so it
-# is a zoom augmentation. Keep the ratio near 0.9 when changing the target size.
-IMAGE_TARGET_SIZE="${IMAGE_TARGET_SIZE:-720}"
-IMAGE_CROP_SIZE="${IMAGE_CROP_SIZE:-648}"
+# Wrist frames are natively 720x720. 736 rather than 720 because Qwen's smart-resize
+# rounds each side to a multiple of patch_size*merge_size = 32: 720 rounds DOWN to
+# 704 (44x44 patches -> 484 visual tokens) and throws away 16 px, while 736 is exact
+# (46x46 -> 529 tokens). Costs 9% more tokens for a 1:1 mapping of 32 native px per
+# token. perceptionv1 was trained at 720/648; use those to reproduce it.
+#
+# IMAGE_CROP_SIZE is NOT the output size: the pipeline crops that fraction and
+# resizes back up to IMAGE_TARGET_SIZE, i.e. it is a zoom augmentation. 662/736 =
+# 0.900, matching the 648/720 = 0.900 perceptionv1 trained with.
+IMAGE_TARGET_SIZE="${IMAGE_TARGET_SIZE:-736}"
+IMAGE_CROP_SIZE="${IMAGE_CROP_SIZE:-662}"
 
 # --- Batch ---
 # Effective batch = GLOBAL_BATCH_SIZE x GRAD_ACCUM_STEPS. GLOBAL_BATCH_SIZE is the
