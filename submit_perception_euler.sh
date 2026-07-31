@@ -91,16 +91,21 @@ time tar -xzf "$CONTAINER_TAR" -C "$TMPDIR"
 # On top of the stats scan done on rank 0 (see submit_euler.sh), the perception
 # sharding additionally reads 3 columns from every heatmap label parquet
 # (~1500 files) to build the fine-phase step masks — local NVMe makes both fast.
-DATASET_LOCAL_DIR="$TMPDIR/g1_dataset_small_general"
+# The container path, the bind target and the launcher's --dataset-path all derive
+# from the host directory name, so pointing DATASET_HOST_DIR at another dataset is
+# the only edit needed.
+DATASET_NAME="$(basename "$DATASET_HOST_DIR")"
+DATASET_LOCAL_DIR="$TMPDIR/$DATASET_NAME"
 echo "[euler] Rsyncing dataset to local scratch (${DATASET_LOCAL_DIR})..."
 time rsync -a --info=progress2 "$DATASET_HOST_DIR/" "$DATASET_LOCAL_DIR/"
 echo "[euler] Dataset copy done."
 
 # --- Launch with Apptainer ---
 # Bindings mirror submit_euler.sh; differences:
-#   - dataset mounts at /workspace/g1_dataset_small_general (= start_finetune_perception.sh DATASET_DIR)
+#   - dataset mounts at /workspace/$DATASET_NAME, and DATASET_DIR is forwarded to
+#     match, so DATASET_HOST_DIR is the only place the dataset name is written
 #   - perception launch/setup scripts + wrist-only modality config are mounted
-#   - RUN_NAME / BASE_MODEL_PATH forwarded into the container
+#   - RUN_NAME / BASE_MODEL_PATH and the run-shaping vars forwarded into the container
 echo "[euler] Starting container..."
 time apptainer exec --nv \
     --bind "$GROOT_DIR:/groot" \
@@ -111,7 +116,7 @@ time apptainer exec --nv \
     --bind "$PROJECT_DIR/setup_and_train_perception.sh:/workspace/setup_and_train_perception.sh" \
     --bind "$PROJECT_DIR/start_finetune_perception.sh:/workspace/start_finetune_perception.sh" \
     --bind "$PROJECT_DIR/register_perception_modality.py:/workspace/register_perception_modality.py" \
-    --bind "$DATASET_LOCAL_DIR:/workspace/g1_dataset_small_general" \
+    --bind "$DATASET_LOCAL_DIR:/workspace/$DATASET_NAME" \
     --env TRITON_CACHE_DIR=/groot/cache/triton \
     --env TORCH_EXTENSIONS_DIR=/groot/cache/torch_kernels \
     --env XDG_CACHE_HOME=/groot/cache \
@@ -124,6 +129,14 @@ time apptainer exec --nv \
     --env DEPTH_LOSS_WEIGHT="${DEPTH_LOSS_WEIGHT:-}" \
     --env WALL_NORMAL_LOSS_WEIGHT="${WALL_NORMAL_LOSS_WEIGHT:-}" \
     --env LEARNING_RATE="${LEARNING_RATE:-}" \
+    --env DATASET_DIR="${DATASET_DIR:-./$DATASET_NAME/}" \
+    --env IMAGE_TARGET_SIZE="${IMAGE_TARGET_SIZE:-}" \
+    --env IMAGE_CROP_SIZE="${IMAGE_CROP_SIZE:-}" \
+    --env GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-}" \
+    --env GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-}" \
+    --env NUM_EPOCHS="${NUM_EPOCHS:-}" \
+    --env MAX_STEPS="${MAX_STEPS:-}" \
+    --env SAVE_STEPS="${SAVE_STEPS:-}" \
     "$TMPDIR/groot-environment.sif" \
     bash /workspace/setup_and_train_perception.sh
 

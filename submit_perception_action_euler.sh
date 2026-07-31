@@ -121,7 +121,12 @@ echo "[euler] Extracting container to \$TMPDIR..."
 time tar -xzf "$CONTAINER_TAR" -C "$TMPDIR"
 
 # --- Copy dataset to local scratch (avoids slow NFS/Lustre reads) ---
-DATASET_LOCAL_DIR="$TMPDIR/g1_dataset"
+# The container path, the bind target and the launcher's --dataset-path all derive
+# from the host directory name, so pointing DATASET_HOST_DIR at another dataset is
+# the only edit needed. NOTE: the mount point is now the host basename
+# (g1_dataset_perception), not the hardcoded /workspace/g1_dataset it used to be.
+DATASET_NAME="$(basename "$DATASET_HOST_DIR")"
+DATASET_LOCAL_DIR="$TMPDIR/$DATASET_NAME"
 echo "[euler] Rsyncing dataset to local scratch (${DATASET_LOCAL_DIR})..."
 time rsync -a --info=progress2 "$DATASET_HOST_DIR/" "$DATASET_LOCAL_DIR/"
 echo "[euler] Dataset copy done."
@@ -137,7 +142,7 @@ time apptainer exec --nv \
     --bind "$PROJECT_DIR/setup_and_train_perception_action.sh:/workspace/setup_and_train_perception_action.sh" \
     --bind "$PROJECT_DIR/start_finetune_perception_action.sh:/workspace/start_finetune_perception_action.sh" \
     --bind "$PROJECT_DIR/register_perception_action_modality.py:/workspace/register_perception_action_modality.py" \
-    --bind "$DATASET_LOCAL_DIR:/workspace/g1_dataset" \
+    --bind "$DATASET_LOCAL_DIR:/workspace/$DATASET_NAME" \
     --env TRITON_CACHE_DIR=/groot/cache/triton \
     --env TORCH_EXTENSIONS_DIR=/groot/cache/torch_kernels \
     --env XDG_CACHE_HOME=/groot/cache \
@@ -159,6 +164,14 @@ time apptainer exec --nv \
     --env NO_PERCEPTION_CONDITIONING="${NO_PERCEPTION_CONDITIONING:-0}" \
     --env ACTION_HORIZON="${ACTION_HORIZON:-}" \
     --env LEARNING_RATE="${LEARNING_RATE:-}" \
+    --env DATASET_DIR="${DATASET_DIR:-./$DATASET_NAME/}" \
+    --env IMAGE_TARGET_SIZE="${IMAGE_TARGET_SIZE:-}" \
+    --env IMAGE_CROP_SIZE="${IMAGE_CROP_SIZE:-}" \
+    --env GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-}" \
+    --env GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-}" \
+    --env NUM_EPOCHS="${NUM_EPOCHS:-}" \
+    --env MAX_STEPS="${MAX_STEPS:-}" \
+    --env SAVE_STEPS="${SAVE_STEPS:-}" \
     "$TMPDIR/groot-environment.sif" \
     bash /workspace/setup_and_train_perception_action.sh
 

@@ -48,6 +48,37 @@ DEPTH_LOSS_WEIGHT="${DEPTH_LOSS_WEIGHT:-0.1}"       # 0 disables the depth outpu
 WALL_NORMAL_LOSS_WEIGHT="${WALL_NORMAL_LOSS_WEIGHT:-0.1}"  # 0 disables the wall-normal output
 LEARNING_RATE="${LEARNING_RATE:-1e-4}"
 
+# --- Image resolution ---
+# The wrist frames are natively 720x720, so 720 is 1:1 with the sensor and each
+# Qwen visual token covers 32 native px. IMAGE_CROP_SIZE is NOT the output size:
+# the pipeline crops that fraction and resizes back up to IMAGE_TARGET_SIZE, so it
+# is a zoom augmentation. Keep the ratio near 0.9 when changing the target size.
+IMAGE_TARGET_SIZE="${IMAGE_TARGET_SIZE:-720}"
+IMAGE_CROP_SIZE="${IMAGE_CROP_SIZE:-648}"
+
+# --- Batch ---
+# Effective batch = GLOBAL_BATCH_SIZE x GRAD_ACCUM_STEPS. GLOBAL_BATCH_SIZE is the
+# total across GPUs, so with 2 GPUs the per-GPU micro-batch is half of it.
+GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-16}"
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-2}"
+
+# --- Training length ---
+# Set NUM_EPOCHS to size the run by the data instead of by a step count; it wins
+# over MAX_STEPS. One epoch here is counted over the LABELLED FINE-PHASE frames
+# (the heatmap_labels/ sidecar), which is what this model actually trains on.
+# SAVE_STEPS defaults to ~1/5 of the run so a killed job loses at most 20%.
+NUM_EPOCHS="${NUM_EPOCHS:-}"
+MAX_STEPS="${MAX_STEPS:-10000}"
+LENGTH_ARGS=(--max-steps "${MAX_STEPS}")
+if [ -n "${NUM_EPOCHS}" ]; then
+    LENGTH_ARGS+=(--num-epochs "${NUM_EPOCHS}")
+    # max_steps is resolved inside the launcher, so a step-derived default for
+    # SAVE_STEPS is not available here; fall back to a fixed cadence.
+    SAVE_STEPS="${SAVE_STEPS:-1000}"
+else
+    SAVE_STEPS="${SAVE_STEPS:-$(( MAX_STEPS / 5 < 200 ? 200 : MAX_STEPS / 5 ))}"
+fi
+
 MASTER_PORT=$(shuf -i 10000-65000 -n 1)
 OUTPUT_DIR="${GROOT_HOME:-/groot}/runs/${RUN_NAME}"
 
@@ -55,6 +86,9 @@ echo "[train] RUN_NAME=${RUN_NAME}"
 echo "[train] DATASET_DIR=${DATASET_DIR}"
 echo "[train] OUTPUT_DIR=${OUTPUT_DIR}"
 echo "[train] BASE_MODEL_PATH=${BASE_MODEL_PATH}"
+echo "[train] RESOLUTION target=${IMAGE_TARGET_SIZE} crop=${IMAGE_CROP_SIZE} (crop is a zoom aug; output is ${IMAGE_TARGET_SIZE}px)"
+echo "[train] BATCH global=${GLOBAL_BATCH_SIZE} x accum=${GRAD_ACCUM_STEPS} -> effective $(( GLOBAL_BATCH_SIZE * GRAD_ACCUM_STEPS ))"
+echo "[train] LENGTH ${LENGTH_ARGS[*]}  SAVE_STEPS=${SAVE_STEPS}"
 echo "[train] MASTER_PORT=${MASTER_PORT}"
 if [ -d "$OUTPUT_DIR" ]; then
     echo "[train] WARNING: output dir already exists. Existing checkpoints:"
@@ -72,14 +106,14 @@ torchrun --nproc_per_node=2 --master_port=$MASTER_PORT \
     --modality-config-path register_perception_modality.py \
     --output-dir "${OUTPUT_DIR}" \
     --save-total-limit 5 \
-    --save-steps 2000 \
-    --max-steps 10000 \
-    --global-batch-size 16 \
-    --gradient-accumulation-steps 2 \
+    --save-steps "${SAVE_STEPS}" \
+    "${LENGTH_ARGS[@]}" \
+    --global-batch-size "${GLOBAL_BATCH_SIZE}" \
+    --gradient-accumulation-steps "${GRAD_ACCUM_STEPS}" \
     --dataloader-num-workers 4 \
     --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.25 hue 0.02 \
-    --image-target-size 720 \
-    --image-crop-size 648 \
+    --image-target-size "${IMAGE_TARGET_SIZE}" \
+    --image-crop-size "${IMAGE_CROP_SIZE}" \
     --learning-rate ${LEARNING_RATE} \
     --heatmap-target-sigma-px ${HEATMAP_SIGMA_PX} \
     --heatmap-loss-weight ${HEATMAP_LOSS_WEIGHT} \
