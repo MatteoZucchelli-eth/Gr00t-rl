@@ -14,8 +14,8 @@
 # limitations under the License.
 
 # Launch finetuning of the PERCEPTION-ONLY model (VLM backbone + target heatmap
-# head) for the short-range fine approach. Trains on wrist-camera fine-phase
-# frames only, supervised by the heatmap_labels/ sidecar parquets.
+# head) for the short-range fine approach. Trains on every wrist-camera frame
+# represented in the heatmap_labels/ sidecar parquets.
 
 import os
 
@@ -100,6 +100,7 @@ if __name__ == "__main__":
     model.heatmap_loss_weight = ft_config.heatmap_loss_weight
     model.offset_loss_weight = ft_config.offset_loss_weight
     model.visibility_loss_weight = ft_config.visibility_loss_weight
+    model.visibility_neg_weight = ft_config.visibility_neg_weight
     model.depth_loss_weight = ft_config.depth_loss_weight
     model.wall_normal_loss_weight = ft_config.wall_normal_loss_weight
     model.use_text_conditioning = ft_config.use_text_conditioning
@@ -116,8 +117,12 @@ if __name__ == "__main__":
     config.training.save_total_limit = ft_config.save_total_limit
     config.training.num_gpus = ft_config.num_gpus
     config.training.use_wandb = ft_config.use_wandb
-    # fine_phase_only=True below, so the epoch is counted over the sidecar labels.
-    config.training.max_steps = resolve_max_steps(ft_config, embodiment_tag, fine_phase_only=True)
+    # Count all sidecar frames, matching perception_labels_only below.
+    config.training.max_steps = resolve_max_steps(
+        ft_config,
+        embodiment_tag,
+        perception_labels_only=True,
+    )
     config.training.weight_decay = ft_config.weight_decay
     config.training.warmup_ratio = ft_config.warmup_ratio
     config.training.wandb_project = ft_config.wandb_project
@@ -127,8 +132,8 @@ if __name__ == "__main__":
     config.data.shard_size = ft_config.shard_size
     config.data.episode_sampling_rate = ft_config.episode_sampling_rate
     config.data.num_shards_per_epoch = ft_config.num_shards_per_epoch
-    # The whole point of this model: train ONLY on the labelled fine-phase
-    # (close-range) frames of each episode.
-    config.data.fine_phase_only = True
+    # Train on every sidecar frame. Out-of-view/occluded rows supervise visibility;
+    # localization, depth, and normal losses are masked to visible rows.
+    config.data.perception_labels_only = True
 
     run(config)

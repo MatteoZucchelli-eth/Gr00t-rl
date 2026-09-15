@@ -34,7 +34,7 @@ Two tokens are emitted (see PerceptionConditioner):
 
 Wrist camera only, single current frame — same input contract as the perception
 model, so its checkpoints (and their keypoint-aware processor) carry over
-unchanged. Trains on fine-phase frames (data.fine_phase_only=True).
+unchanged. Trains on every sidecar frame (data.perception_labels_only=True).
 """
 
 import logging

@@ -6,13 +6,13 @@ source .env
 # Fine-approach PERCEPTION-CONDITIONED ACTION model: GR00T VLM backbone +
 # target heatmap head + flow-matching action head, where the perception output is
 # cast into conditioning tokens the DiT attends to.
-# Wrist camera only, fine-phase frames only (heatmap_labels/ sidecar).
+# Wrist camera only, every frame in the heatmap_labels/ sidecar.
 # Keep RUN_NAME stable across resubmissions of the SAME experiment so training
 # resumes; bump it to start fresh (same caveats as start_finetune.sh).
 RUN_NAME="${RUN_NAME:-perception_action_v1}"
 
 # Dataset root as seen from the training cwd (/workspace in the container). Must
-# contain the heatmap_labels/ sidecar — this model trains on fine-phase frames only,
+# contain the heatmap_labels/ sidecar — this model trains on its rows only,
 # so a dataset without it (e.g. g1_dataset_red_2k) yields zero trainable steps.
 # The submit script mounts the host dataset at this path.
 DATASET_DIR="${DATASET_DIR:-./g1_dataset/}"
@@ -93,8 +93,8 @@ GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-4}"
 
 # --- Training length ---
 # NUM_EPOCHS sizes the run by the data and wins over MAX_STEPS. One epoch is counted
-# over the LABELLED FINE-PHASE frames (heatmap_labels/ sidecar), which is what this
-# model trains on — not over whole episodes.
+# over every frame represented in the heatmap_labels/ sidecar, not over episodes
+# without labels.
 NUM_EPOCHS="${NUM_EPOCHS:-}"
 MAX_STEPS="${MAX_STEPS:-10000}"
 LENGTH_ARGS=(--max-steps "${MAX_STEPS}")

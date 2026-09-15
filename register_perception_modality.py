@@ -1,8 +1,8 @@
 """GR00T modality config for the WRIST-ONLY perception model (fine approach).
 
 Used by gr00t/experiment/launch_finetune_perception.py to finetune the
-perception-only model (VLM backbone + target heatmap head) on the fine-phase
-frames of the drilling dataset.
+perception-only model (VLM backbone + target heatmap head) on every labelled
+frame of the drilling dataset.
 
 Differences vs the full-VLA config (register_new_modality.py):
   - video:  ONLY the wrist camera, single CURRENT frame (delta_indices=[0]).

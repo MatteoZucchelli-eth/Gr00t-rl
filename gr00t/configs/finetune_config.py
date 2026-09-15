@@ -74,8 +74,10 @@ class FinetuneConfig:
     (only used if use_tip_target_head)."""
 
     tip_target_loss_type: str = "mse"
-    """Tip-target objective. "mse" (default): one plain MSE over the whole scaled 9d vector --
-    the original objective and the only one measured to work. "rel_abs": position error
+    """Tip-target objective. "mse" (default): the per-part MSEs of xyz and rot6d averaged
+    50/50. Originally a single MSE over the whole scaled 9d vector, which gave rot6d 2x the
+    weight of xyz simply by occupying 6 of the 9 averaged dims; the 50/50 split removes that.
+    The comparison below was measured against that original 9d form. "rel_abs": position error
     normalized by the distance to target plus an absolute anchor. rel_abs is MEASURED WORSE
     (5.7x worse mean position error in-distribution, predicted-distance regression slope 0.82
     vs 1.02, -98 mm bias beyond 30 cm): dividing by distance makes far-range error nearly free
@@ -93,8 +95,8 @@ class FinetuneConfig:
 
     tip_target_rot_loss_weight: float = 1.0
     """Weight of the rotation term (plain MSE on the raw rot6d part). Applies to
-    tip_target_loss_type="rel_abs" ONLY; inert under "mse", where rot6d instead gets 2x the
-    weight of xyz by virtue of occupying 6 of the 9 averaged dims."""
+    tip_target_loss_type="rel_abs" ONLY; inert under "mse", which weights rot6d and xyz
+    equally at 0.5 each."""
 
     tip_target_dist_floor: float = 0.05
     """Distance floor (metres) for the position-loss normalization. Applies to
@@ -301,6 +303,11 @@ class _PerceptionCommonConfig:
     visibility_loss_weight: float = 0.5
     """Weight of the visibility BCE (all frames)."""
 
+    visibility_neg_weight: float = 1.0
+    """Per-sample weight on target_visible=0 rows in the visibility BCE. 1.0 is the
+    unweighted loss. If class balancing is desired, derive n_pos/n_neg from the
+    generated sidecar; the ratio is dataset-dependent now that every frame is used."""
+
     depth_loss_weight: float = 0.1
     """Weight of the target-depth loss (0 disables the depth output)."""
 
@@ -349,9 +356,9 @@ class _PerceptionCommonConfig:
     num_epochs: float | None = None
     """If set, derive max_steps from the dataset size instead of specifying it directly.
     Same meaning and same caveat as FinetuneConfig.num_epochs, with one difference that
-    matters: these finetunes run with fine_phase_only=True, so an "epoch" is counted over
-    the labelled fine-phase frames in the heatmap_labels/ sidecar, NOT over whole
-    episodes. Datasets without that sidecar cannot use num_epochs at all."""
+    matters: these finetunes run with perception_labels_only=True, so an "epoch" is
+    counted over every row in the heatmap_labels/ sidecar, not over episodes without
+    labels. Datasets without that sidecar cannot use num_epochs at all."""
 
     weight_decay: float = 1e-5
     warmup_ratio: float = 0.05
@@ -369,8 +376,8 @@ class PerceptionFinetuneConfig(_PerceptionCommonConfig):
 
     The model sees ONLY the current wrist-camera frame + instruction and predicts the
     wall-target location as a heatmap in wrist-camera pixels, a visibility flag, and
-    optionally target depth / wall normal. Training samples only the labelled fine-phase
-    frames (heatmap_labels/ sidecar next to data/).
+    optionally target depth / wall normal. Training samples every frame represented in
+    the heatmap_labels/ sidecar next to data/.
     """
 
     base_model_path: str | None = None

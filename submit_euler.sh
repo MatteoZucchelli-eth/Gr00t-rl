@@ -85,6 +85,21 @@ GROOT_DIR="/cluster/scratch/$USER/groot"
 RESULTS_DIR="/cluster/project/mrl/$USER/results/groot/$SLURM_JOB_ID"
 DATASET_HOST_DIR="${DATASET_HOST_DIR:-/cluster/work/mrl/$USER/datasets/g1_dataset_red_2k}"
 
+# The container path, the bind target and the launcher's --dataset-path all derive
+# from the host directory's BASENAME, so pointing DATASET_HOST_DIR at another capture
+# is the only edit needed. (This used to be hardcoded to g1_dataset_red_2k in three
+# places, which meant a new dataset trained under the old name.)
+DATASET_NAME="$(basename "$DATASET_HOST_DIR")"
+
+# Modality config to register under NEW_EMBODIMENT — must match the dataset's
+# meta/modality.json (see start_finetune.sh). Bound into the container by name.
+MODALITY_CONFIG="${MODALITY_CONFIG:-register_new_modality.py}"
+if [ ! -f "$PROJECT_DIR/$MODALITY_CONFIG" ]; then
+    echo "[euler] ERROR: modality config $PROJECT_DIR/$MODALITY_CONFIG not found."
+    echo "[euler] Did the codebase rsync pick it up? (see header)"
+    exit 1
+fi
+
 # --- Job info ---
 echo "=== groot Finetune Job ==="
 echo "Job ID:    $SLURM_JOB_ID"
@@ -92,6 +107,10 @@ echo "Host:      $(hostname)"
 echo "Date:      $(date)"
 echo "GPU:       $CUDA_VISIBLE_DEVICES"
 echo "TMPDIR:    $TMPDIR"
+echo "DATASET:   $DATASET_HOST_DIR  (-> /workspace/$DATASET_NAME)"
+echo "MODALITY:  $MODALITY_CONFIG"
+echo "RUN_NAME:  ${RUN_NAME:-red_and_green}"
+echo "TIP HEAD:  ${USE_TIP_TARGET_HEAD:-<default: true>}"
 echo "========================="
 
 # --- Create directories ---
@@ -111,7 +130,7 @@ time tar -xzf "$CONTAINER_TAR" -C "$TMPDIR"
 # generate_stats/generate_rel_stats scans all parquet files on rank 0 before the NCCL
 # barrier — on Lustre this takes ~4.5 s/file (~10 min for 131 files), exceeding the
 # 600 s barrier timeout.  Reading from local NVMe reduces this to <10 s total.
-DATASET_LOCAL_DIR="$TMPDIR/g1_dataset_red_2k"
+DATASET_LOCAL_DIR="$TMPDIR/$DATASET_NAME"
 echo "[euler] Rsyncing dataset to local scratch (${DATASET_LOCAL_DIR})..."
 time rsync -a --info=progress2 "$DATASET_HOST_DIR/" "$DATASET_LOCAL_DIR/"
 echo "[euler] Dataset copy done."
@@ -131,8 +150,8 @@ time apptainer exec --nv \
     --bind "$PROJECT_DIR/gr00t:/workspace/gr00t" \
     --bind "$PROJECT_DIR/setup_and_train.sh:/workspace/setup_and_train.sh" \
     --bind "$PROJECT_DIR/start_finetune.sh:/workspace/start_finetune.sh" \
-    --bind "$PROJECT_DIR/register_new_modality.py:/workspace/register_new_modality.py" \
-    --bind "$DATASET_LOCAL_DIR:/workspace/g1_dataset_red_2k" \
+    --bind "$PROJECT_DIR/$MODALITY_CONFIG:/workspace/$MODALITY_CONFIG" \
+    --bind "$DATASET_LOCAL_DIR:/workspace/$DATASET_NAME" \
     --env TRITON_CACHE_DIR=/groot/cache/triton \
     --env TORCH_EXTENSIONS_DIR=/groot/cache/torch_kernels \
     --env XDG_CACHE_HOME=/groot/cache \
@@ -143,7 +162,10 @@ time apptainer exec --nv \
     --env SAVE_STEPS="${SAVE_STEPS:-}" \
     --env IMAGE_TARGET_SIZE="${IMAGE_TARGET_SIZE:-}" \
     --env IMAGE_CROP_SIZE="${IMAGE_CROP_SIZE:-}" \
-    --env DATASET_DIR="${DATASET_DIR:-}" \
+    --env DATASET_DIR="${DATASET_DIR:-./$DATASET_NAME/}" \
+    --env MODALITY_CONFIG="$MODALITY_CONFIG" \
+    --env USE_TIP_TARGET_HEAD="${USE_TIP_TARGET_HEAD:-}" \
+    --env GR00T_VIDEO_DELTA="${GR00T_VIDEO_DELTA:-}" \
     --env GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-}" \
     --env GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-}" \
     "$TMPDIR/groot-environment.sif" \

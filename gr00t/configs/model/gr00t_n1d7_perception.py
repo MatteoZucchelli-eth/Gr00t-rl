@@ -33,7 +33,7 @@ class Gr00tN1d7PerceptionConfig(Gr00tN1d7Config):
 
     No action head / DiT is instantiated; state and action inputs are ignored.
     Labels come from the heatmap_labels/ sidecar parquets and training samples
-    only the fine-phase frames (data.fine_phase_only=True).
+    every sidecar row (data.perception_labels_only=True).
     """
 
     # Model identification (overrides Gr00tN1d7)
@@ -55,6 +55,13 @@ class Gr00tN1d7PerceptionConfig(Gr00tN1d7Config):
 
     visibility_loss_weight: float = 0.5
     """Weight of the visibility BCE (all frames)."""
+
+    visibility_neg_weight: float = 1.0
+    """Per-sample weight on target_visible=0 rows inside the visibility BCE.
+
+    1.0 gives an unweighted loss. A class-balanced choice is n_pos/n_neg, measured
+    from the generated sidecar for the dataset being trained. The loss is normalized
+    by the weight sum, so its magnitude does not move with this value."""
 
     depth_loss_weight: float = 0.1
     """Weight of the target-depth SmoothL1 loss (visible frames only). 0 disables the head."""

@@ -60,18 +60,14 @@ def count_trainable_steps(dataset_path: str, action_horizon: int) -> int:
     return sum(max(0, length - action_horizon + 1) for length in lengths)
 
 
-def count_fine_phase_steps(dataset_path: str, action_horizon: int) -> int:
-    """Trainable steps for a `fine_phase_only` run (both perception finetunes).
+def count_perception_label_steps(dataset_path: str, action_horizon: int) -> int:
+    """Trainable steps represented by perception-label sidecars.
 
-    Mirrors ShardedSingleStepDataset.get_valid_step_indices with fine_phase_only=True:
-    a step counts only if the heatmap sidecar marks it `fine_phase & label_ok` AND it
-    can still start a full action chunk. Episodes with no sidecar file contribute
-    nothing, exactly as at shard time. count_trainable_steps overcounts here by
-    whatever the unlabelled/coarse fraction is -- ~19% on g1_dataset_small_general and
-    ~17% on g1_dataset as of 2026-07, but that is a property of the label generation
-    run, not a constant.
+    Mirrors ``ShardedSingleStepDataset.get_valid_step_indices`` with
+    ``perception_labels_only=True``: every sidecar row that can still start a full
+    action chunk counts. Episodes without a sidecar contribute nothing.
 
-    Reads 3 columns from every heatmap_labels/ parquet. The submit scripts stage the
+    Reads one column from every heatmap_labels/ parquet. The submit scripts stage the
     dataset on local NVMe first (they already pay this scan at shard time), where it
     costs seconds; on Lustre it would not.
     """
@@ -109,13 +105,11 @@ def count_fine_phase_steps(dataset_path: str, action_horizon: int) -> int:
             effective = max(0, int(episode["length"]) - action_horizon + 1)
             if effective == 0:
                 continue
-            cols = pd.read_parquet(path, columns=["frame_index", "fine_phase", "label_ok"])
-            valid = (cols["fine_phase"].astype(bool) & cols["label_ok"].astype(bool)).to_numpy()
-            frame_index = cols["frame_index"].to_numpy()
-            total += int((valid & (frame_index < effective)).sum())
+            frame_index = pd.read_parquet(path, columns=["frame_index"])["frame_index"].to_numpy()
+            total += int((frame_index < effective).sum())
             labelled += 1
     print(
-        f"[epochs] fine-phase scan: {labelled:,}/{len(label_files):,} labelled episodes "
+        f"[epochs] perception-label scan: {labelled:,}/{len(label_files):,} labelled episodes "
         f"contribute {total:,} trainable steps"
     )
     return total
@@ -134,7 +128,11 @@ def resolve_action_horizon(embodiment_tag: str) -> int:
     return max(delta_indices) - min(delta_indices) + 1
 
 
-def resolve_max_steps(ft_config, embodiment_tag: str, fine_phase_only: bool = False) -> int:
+def resolve_max_steps(
+    ft_config,
+    embodiment_tag: str,
+    perception_labels_only: bool = False,
+) -> int:
     """max_steps from --num-epochs when given, else --max-steps verbatim.
 
     One "epoch" is a target expressed in samples: num_epochs * trainable_steps
@@ -143,9 +141,9 @@ def resolve_max_steps(ft_config, embodiment_tag: str, fine_phase_only: bool = Fa
     some frames are visited several times before others are visited once. Read it as
     "each frame seen num_epochs times in expectation".
 
-    `fine_phase_only` must match config.data.fine_phase_only: the perception finetunes
-    train on the labelled close-range tail of each episode only, so their epoch is
-    counted over the heatmap sidecar rather than over whole episodes.
+    ``perception_labels_only`` must match ``config.data.perception_labels_only``:
+    perception finetunes require sidecars, so their epoch is counted over sidecar
+    frame indices rather than blindly counting every episode.
     """
     if ft_config.num_epochs is None:
         return ft_config.max_steps
@@ -153,8 +151,10 @@ def resolve_max_steps(ft_config, embodiment_tag: str, fine_phase_only: bool = Fa
         raise ValueError(f"--num-epochs must be > 0, got {ft_config.num_epochs}")
 
     action_horizon = resolve_action_horizon(embodiment_tag)
-    counter = count_fine_phase_steps if fine_phase_only else count_trainable_steps
-    trainable = counter(ft_config.dataset_path, action_horizon)
+    if perception_labels_only:
+        trainable = count_perception_label_steps(ft_config.dataset_path, action_horizon)
+    else:
+        trainable = count_trainable_steps(ft_config.dataset_path, action_horizon)
     per_step = ft_config.global_batch_size * ft_config.gradient_accumulation_steps
     steps = math.ceil(ft_config.num_epochs * trainable / per_step)
     print(

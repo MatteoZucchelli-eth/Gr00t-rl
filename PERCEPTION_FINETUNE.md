@@ -18,10 +18,11 @@ model takes over at short range for precise servoing.
 | `wall_normal` | (3,) | Wall normal in the camera frame (optional head) |
 
 Supervision comes from `g1_dataset/heatmap_labels/chunk-XXX/episode_XXXXXX.parquet`
-(columns `u`, `v`, `visible`, `fine_phase`, `label_ok`, `depth_z`, `wall_normal_cam_*`),
-joined to episodes by `frame_index`. **Training samples only `fine_phase & label_ok`
-frames** (`data.fine_phase_only=True`), and frames with `visible=False` train the
-visibility head — so the model learns to say "I don't see it" instead of hallucinating.
+(columns `u`, `v`, `visible`, `label_ok`, `depth_z`, `wall_normal_cam_*`), joined to
+episodes by `frame_index`. **Training samples every sidecar row**
+(`data.perception_labels_only=True`). Frames with `visible=False` train the visibility
+head, while localization, offset, depth, and normal losses are masked out, so the model
+learns to say "I don't see it" instead of hallucinating a location.
 
 ## Key mechanics
 
@@ -97,17 +98,15 @@ RUN_NAME=perception_v2 \
 That restarts at step 0 with a fresh optimizer and LR schedule, which is what you want
 anyway: the old ones were built for the old architecture.
 
-### The dataset is NOT pre-cut — fine-phase selection happens at train time
+### The dataset is not pre-cut — every labelled frame is sampled
 
-The `g1_dataset/data/**.parquet` (and the videos) are **full episodes** (~900 frames each,
-drill-tip state/action for the whole trajectory). Nothing is trimmed on disk. The
-"only the last part of the execution" behaviour is applied at training time:
-`data.fine_phase_only=True` (set by the perception launcher) makes the sharder sample
-only steps where the `heatmap_labels/` sidecar has `fine_phase & label_ok`, via a
-per-episode boolean mask. `fine_phase` need not be one contiguous block (e.g. episode 0
-has gaps) — the mask handles that. Yield here: ~1.16M fine-phase steps across the 1512
-episodes. So you point the run at the full `./g1_dataset` and the filtering is automatic;
-no separate "cut" dataset is needed.
+The `g1_dataset/data/**.parquet` (and the videos) are full episodes. Nothing is trimmed
+on disk. `data.perception_labels_only=True` (set by the perception launcher) makes the
+sharder sample every `frame_index` present in the `heatmap_labels/` sidecar, including
+rows with `label_ok=False` or `visible=False`. This is deliberate: every row supplies a
+visibility target, while the other perception losses use the visibility mask. Episodes
+without a sidecar are excluded. Point the run at the full dataset; no separate cut
+dataset is needed.
 
 Monitor in wandb: `heatmap_loss`, `offset_loss`, `visibility_loss`, `depth_loss`,
 `normal_loss`, and the direct quality metrics `uv_err_px_metric` (px error on visible
@@ -190,7 +189,7 @@ everything on `visibility` (e.g. hold the last confident estimate when it drops 
 | `gr00t/model/gr00t_n1d7/processing_perception.py` | Keypoint-aware processor, emits `target_*` labels |
 | `gr00t/model/gr00t_n1d7/setup_perception.py` | Pipeline: fresh processor, selective backbone weight transfer |
 | `gr00t/data/dataset/lerobot_episode_loader.py` | Loads/joins `heatmap_labels/` sidecar (`target_uv`, …) |
-| `gr00t/data/dataset/sharded_single_step_dataset.py` | `fine_phase_only` step filtering |
+| `gr00t/data/dataset/sharded_single_step_dataset.py` | all-sidecar-frame step filtering |
 | `register_perception_modality.py` | Wrist-only modality config (video/state/action all `delta_indices=[0]`) |
 | `gr00t/experiment/launch_finetune_perception.py` | CLI entry point (`PerceptionFinetuneConfig`) |
 | `start_finetune_perception.sh` | Cluster launch script |

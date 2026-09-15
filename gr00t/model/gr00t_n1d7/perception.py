@@ -23,7 +23,7 @@ optionally its depth and the wall normal in the camera frame.
 
 There is no action head: this model does perception only. The coarse approach
 keeps using the full VLA; this model takes over close to the wall, where the
-heatmap_labels/ sidecar provides fine-phase supervision.
+heatmap_labels/ sidecar provides supervision on every recorded frame.
 """
 
 import logging
@@ -346,8 +346,13 @@ def perception_losses(
     offset_l1 = F.smooth_l1_loss(pred_off, target_off, reduction="none").sum(dim=-1)
     offset_loss = (offset_l1 * heat_valid).sum() / heat_valid.sum().clamp_min(1.0)
 
-    # --- Visibility BCE over all rows ---
-    visibility_loss = F.binary_cross_entropy_with_logits(vis_logit, target_visible)
+    # --- Visibility BCE over all rows, optionally class-weighted ---
+    # Weight-normalized rather than mean-reduced so visibility_loss_weight keeps its
+    # meaning when visibility_neg_weight changes; at neg_weight=1 this is the mean.
+    vis_w = 1.0 + (config.visibility_neg_weight - 1.0) * (1.0 - target_visible)
+    visibility_loss = (
+        F.binary_cross_entropy_with_logits(vis_logit, target_visible, reduction="none") * vis_w
+    ).sum() / vis_w.sum().clamp_min(1e-6)
 
     loss = (
         config.heatmap_loss_weight * heatmap_loss

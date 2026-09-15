@@ -179,4 +179,8 @@ groot-environment.tar.gz
 *.tar.gz
 
 vla_eval_results
-data
+
+# Local analysis scratch: ablation scripts, eval CSVs, figures and run logs.
+# Kept on disk, out of the repo.
+scratchpad/
+hand_image_raw.png

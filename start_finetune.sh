@@ -22,11 +22,25 @@ RUN_NAME="${RUN_NAME:-red_and_green}"
 # Override with DATASET_DIR=... to train on a different capture.
 DATASET_DIR="${DATASET_DIR:-./g1_dataset_red_2k/}"
 
+# Modality config registered under NEW_EMBODIMENT. It must match the dataset's
+# meta/modality.json: a group named there but missing from the parquet layout is
+# only WARNED about by LeRobotEpisodeLoader._extract_joint_groups, so a mismatch
+# silently narrows the state vector instead of failing.
+#   register_new_modality.py         35-dim state captures (red_2k, negatives, ...)
+#   register_autocollect_modality.py 23-dim right-arm-only capture (autocollect_v2)
+MODALITY_CONFIG="${MODALITY_CONFIG:-register_new_modality.py}"
+
 # Set to true to train the auxiliary tip-target head: predicts the target pose
 # in the drill-tip frame as xyz(3) + rot6d(6) from the `next.tip_target_9d`
 # label and feeds it back as a conditioning token to the action head
 # (conditioning is on by default via --use-tip-target-conditioning).
-USE_TIP_TARGET_HEAD=true
+#
+# USE_TIP_TARGET_HEAD=false is the VANILLA GR00T N1.7 architecture: no auxiliary
+# head, no conditioning token, loss == the flow-matching action loss alone. Every
+# tip-target flag below is then inert (launch_finetune.py still forwards them into
+# the model config, but Gr00tN1d7ActionHead never constructs the head). Use it for
+# the baseline arm of "does the tip-target head actually buy anything".
+USE_TIP_TARGET_HEAD="${USE_TIP_TARGET_HEAD:-true}"
 TIP_TARGET_LOSS_WEIGHT=0.5       # overall tip-target loss multiplier vs the action loss
 TIP_TARGET_XYZ_SCALE=0.1         # metres; scales xyz inside the head's prediction space
 
@@ -75,10 +89,24 @@ TIP_TARGET_ARGS=""
 #   target 384 crop 344 -> 144 tok/img, seq  595, ~54 native px per token
 #   target 512 crop 460 -> 256 tok/img, seq 1043, ~40 native px per token
 #   target 720 crop 648 -> 484 tok/img, seq 1955, ~30 native px per token
-# The drill target is only ~25 px in the native 720px wrist frame, i.e. 0.30 of one
-# token at 256 and still 0.86 at 720 -- so there is real headroom here, but change it
-# on its own, not alongside another variable, and watch memory: visual tokens scale
-# with area and the batch may need accumulation again.
+# MEASURED target size (scratchpad/ measure over 49,204 fine-phase visible frames of
+# g1_dataset_autocollect_v2, from the corner_uv_* label columns): the target square is
+# 42.2 px per side in the native 720px wrist frame at the median fine-phase range of
+# 154 mm -- NOT the ~25 px this comment used to claim. In visual tokens (1 token = 32
+# processed px) that is:
+#     256 -> 0.47 tok    384 -> 0.70 tok    512 -> 0.94 tok    720 -> 1.32 tok
+# Below ~1 token the target cannot be localized by WHICH token fires, only by that
+# token's content, so 256 px really is coarse for this task. Two hard ceilings though:
+# the wrist is natively 720 and the EGO IS NATIVELY 480, and image_target_size is a
+# single global value applied to every view (the transform is built once in
+# processing_gr00t_n1d7.py) -- so anything above 480 already upsamples the ego view and
+# anything above 720 is pure upsampling. Cost is steep: VLM self-attention is O(L^2) in
+# the token count, so 256->384 is 4.5x, 256->512 is 13.6x, 256->720 is 47x.
+# Change it on its own, not alongside another variable, and watch memory.
+#
+# NOTE the 512-vs-256 numbers in scratchpad/tip_eval_512_vs_256.csv are CONFOUNDED:
+# the 512 runs stopped at 12,662 steps against 25,323 for the 256 runs, i.e. half the
+# samples. They are not evidence that resolution hurts.
 
 # Batch. Effective batch = GLOBAL_BATCH_SIZE x GRAD_ACCUM_STEPS, and GLOBAL_BATCH_SIZE
 # is split across the GPUs (32 over 2 GPUs = 16/GPU). Keep the product at 32 when
@@ -128,6 +156,8 @@ OUTPUT_DIR="${GROOT_HOME:-/groot}/runs/${RUN_NAME}"
 # --- Debug: surface the resolved configuration (goes to stdout / the .out log) ---
 echo "[train] RUN_NAME=${RUN_NAME}"
 echo "[train] DATASET_DIR=${DATASET_DIR}"
+echo "[train] MODALITY_CONFIG=${MODALITY_CONFIG}"
+echo "[train] USE_TIP_TARGET_HEAD=${USE_TIP_TARGET_HEAD} (false = vanilla GR00T N1.7)"
 echo "[train] OUTPUT_DIR=${OUTPUT_DIR}"
 echo "[train] MASTER_PORT=${MASTER_PORT}"
 echo "[train] TIP_TARGET_ARGS=${TIP_TARGET_ARGS:-<none>}"
@@ -158,7 +188,7 @@ torchrun --nproc_per_node=2 --master_port=$MASTER_PORT gr00t/experiment/launch_f
     --base-model-path nvidia/GR00T-N1.7-3B \
     --dataset-path "${DATASET_DIR}" \
     --embodiment-tag NEW_EMBODIMENT \
-    --modality-config-path register_new_modality.py \
+    --modality-config-path "${MODALITY_CONFIG}" \
     --output-dir "${OUTPUT_DIR}" \
     --save-total-limit 5 \
     --save-steps ${SAVE_STEPS} \

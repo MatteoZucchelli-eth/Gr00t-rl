@@ -123,7 +123,7 @@ slightly conservative — so the default is 3 px, still only ~1 mm of target unc
 against a 5 mm tolerance.
 
 If you have the perception run's own `uv_err_px_metric` from wandb, **prefer it**: it
-covers every fine-phase frame including moving ones, which this eval does not.
+covers every labelled frame including moving ones, which this eval does not.
 
 ### Finding 2 — the depth error is a bias, not noise
 
@@ -220,10 +220,10 @@ is what helps. Run it.
 
 Wrist camera only, single current frame (`register_perception_action_modality.py`), with a
 30-step **relative** drill-tip action chunk and the same proprioceptive state keys as the
-full VLA (so a VLA checkpoint's state encoder transfers). Training samples only
-fine-phase frames (`data.fine_phase_only=True`), matching the perception model — about 767
-of ~900 frames per episode, so it is not a narrow tail filter. The horizon-30 chunk costs
-the last 29 frames of each episode.
+full VLA (so a VLA checkpoint's state encoder transfers). Training samples every
+sidecar frame (`data.perception_labels_only=True`), matching the perception model. The
+horizon-30 action chunk necessarily excludes the last 29 frames of each episode because
+those frames cannot begin a complete target chunk.
 
 ### What to watch in wandb
 

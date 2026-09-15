@@ -494,7 +494,7 @@ class Gr00tN1d7ActionHead(nn.Module):
         # Tip-target head loss over rows with a resolved label. Two objectives,
         # selected by `tip_target_loss_type` (see the model config for the
         # measurements behind the default):
-        #   "mse":     one plain MSE over the whole scaled 9d vector.
+        #   "mse":     the two per-part MSEs (xyz, rot6d) averaged 50/50.
         #   "rel_abs": xyz error normalized by the (clamped) distance to target
         #              plus an absolute anchor, and a separate rot6d MSE.
         # The per-part MSEs are always logged as diagnostics so the two
@@ -513,10 +513,11 @@ class Gr00tN1d7ActionHead(nn.Module):
                 outputs["tip_target_rot_loss"] = tip_rot_loss
 
                 if self.tip_target_loss_type == "mse":
-                    # Single MSE over all 9 dims. NOT the same as summing the two
-                    # per-part MSEs above: averaging over 9 dims weights rot6d
-                    # (6 dims) twice as much as xyz (3 dims).
-                    tip_target_loss = F.mse_loss(pred_v, tgt_v)
+                    # Mean of the two per-part MSEs, which weights xyz and rot6d
+                    # equally. NOT F.mse_loss(pred_v, tgt_v) over all 9 dims: that
+                    # averages over 6 rot6d dims and 3 xyz dims, so it hands rot6d
+                    # twice the weight purely as an artefact of the vector layout.
+                    tip_target_loss = 0.5 * tip_pos_abs_loss + 0.5 * tip_rot_loss
                 else:
                     xyz_scale = self.tip_target_head.xyz_scale
                     xyz_residual_m = (pred_v[:, :3] - tgt_v[:, :3]) * xyz_scale

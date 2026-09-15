@@ -133,11 +133,14 @@ class Gr00tN1d7Config(PretrainedConfig):
     # (Gram-Schmidt) only at inference (Zhou et al., CVPR 2019).
     #
     # `tip_target_loss_type` selects the objective:
-    #   "mse" (default): a single plain MSE over the whole scaled 9d vector.
-    #        Because it averages over 9 dims, rot6d (6 dims) carries 2x the
-    #        weight of xyz (3 dims). This is the original objective, and the
-    #        only one measured to work -- see the comparison in
-    #        `scripts/eval/compare_tip_target_heads.py`.
+    #   "mse" (default): the per-part MSEs of xyz and rot6d, averaged 50/50.
+    #        The original form of this objective was a single MSE over the whole
+    #        scaled 9d vector, which -- averaging over 6 rot6d dims and 3 xyz
+    #        dims -- gave rot6d 2x the weight of xyz as an artefact of the vector
+    #        layout rather than by intent. The 50/50 split removes that. NOTE the
+    #        "mse beats rel_abs" numbers below were measured against the ORIGINAL
+    #        9d form; the comparison in `scripts/eval/compare_tip_target_heads.py`
+    #        has not been re-run against the 50/50 split.
     #   "rel_abs": distance-normalized position term (clamped at
     #        `tip_target_dist_floor`) plus an absolute anchor, with separate
     #        pos/rot weights. Kept for reproducibility only. MEASURED WORSE:

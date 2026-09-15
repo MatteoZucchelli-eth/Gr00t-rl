@@ -4,7 +4,7 @@ set -euo pipefail
 source .env
 
 # Fine-approach PERCEPTION model: GR00T VLM backbone + target heatmap head.
-# Wrist camera only, fine-phase frames only (heatmap_labels/ sidecar).
+# Wrist camera only, every frame in the heatmap_labels/ sidecar.
 # Keep RUN_NAME stable across resubmissions of the SAME experiment so training
 # resumes; bump it to start fresh (same caveats as start_finetune.sh).
 RUN_NAME="${RUN_NAME:-perception_v1}"
@@ -48,6 +48,9 @@ HEATMAP_SIGMA_PX="${HEATMAP_SIGMA_PX:-8.0}"        # Gaussian target std, proces
 HEATMAP_LOSS_WEIGHT="${HEATMAP_LOSS_WEIGHT:-1.0}"
 OFFSET_LOSS_WEIGHT="${OFFSET_LOSS_WEIGHT:-1.0}"
 VISIBILITY_LOSS_WEIGHT="${VISIBILITY_LOSS_WEIGHT:-0.5}"  # BCE: "is the target in the image at all?"
+# Per-sample weight on target_visible=0 rows. 1.0 is unweighted; if balancing is
+# desired, measure n_pos/n_neg from the newly generated all-frame sidecar.
+VISIBILITY_NEG_WEIGHT="${VISIBILITY_NEG_WEIGHT:-1.0}"
 DEPTH_LOSS_WEIGHT="${DEPTH_LOSS_WEIGHT:-0.1}"       # 0 disables the depth output
 WALL_NORMAL_LOSS_WEIGHT="${WALL_NORMAL_LOSS_WEIGHT:-0.1}"  # 0 disables the wall-normal output
 LEARNING_RATE="${LEARNING_RATE:-1e-4}"
@@ -73,8 +76,8 @@ GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-2}"
 
 # --- Training length ---
 # Set NUM_EPOCHS to size the run by the data instead of by a step count; it wins
-# over MAX_STEPS. One epoch here is counted over the LABELLED FINE-PHASE frames
-# (the heatmap_labels/ sidecar), which is what this model actually trains on.
+# over MAX_STEPS. One epoch here is counted over every frame represented in the
+# heatmap_labels/ sidecar.
 # SAVE_STEPS defaults to ~1/5 of the run so a killed job loses at most 20%.
 NUM_EPOCHS="${NUM_EPOCHS:-}"
 MAX_STEPS="${MAX_STEPS:-10000}"
@@ -98,6 +101,7 @@ echo "[train] BASE_MODEL_PATH=${BASE_MODEL_PATH}"
 echo "[train] RESOLUTION target=${IMAGE_TARGET_SIZE} crop=${IMAGE_CROP_SIZE} (crop is a zoom aug; output is ${IMAGE_TARGET_SIZE}px)"
 echo "[train] BATCH global=${GLOBAL_BATCH_SIZE} x accum=${GRAD_ACCUM_STEPS} -> effective $(( GLOBAL_BATCH_SIZE * GRAD_ACCUM_STEPS ))"
 echo "[train] LENGTH ${LENGTH_ARGS[*]}  SAVE_STEPS=${SAVE_STEPS}"
+echo "[train] VISIBILITY weight=${VISIBILITY_LOSS_WEIGHT} neg_weight=${VISIBILITY_NEG_WEIGHT}"
 echo "[train] MASTER_PORT=${MASTER_PORT}"
 if [ -d "$OUTPUT_DIR" ]; then
     echo "[train] WARNING: output dir already exists. Existing checkpoints:"
@@ -128,6 +132,7 @@ torchrun --nproc_per_node=2 --master_port=$MASTER_PORT \
     --heatmap-loss-weight ${HEATMAP_LOSS_WEIGHT} \
     --offset-loss-weight ${OFFSET_LOSS_WEIGHT} \
     --visibility-loss-weight ${VISIBILITY_LOSS_WEIGHT} \
+    --visibility-neg-weight ${VISIBILITY_NEG_WEIGHT} \
     --depth-loss-weight ${DEPTH_LOSS_WEIGHT} \
     --wall-normal-loss-weight ${WALL_NORMAL_LOSS_WEIGHT} \
     --num-gpus 2 \

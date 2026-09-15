@@ -88,7 +88,6 @@ def extract_step_data(
         row = episode_data.iloc[step_index]
         metadata["target_uv"] = np.asarray(row["target_uv"], dtype=np.float32)
         metadata["target_visible"] = bool(row["target_visible"])
-        metadata["target_fine_phase"] = bool(row["target_fine_phase"])
         metadata["target_label_ok"] = bool(row["target_label_ok"])
         metadata["target_depth"] = np.float32(row["target_depth"])
         metadata["target_wall_normal"] = np.asarray(row["target_wall_normal"], dtype=np.float32)
@@ -136,9 +135,8 @@ class ShardedSingleStepDataset(ShardedDataset):
         episode_sampling_rate: Fraction of episode timesteps to use (for efficiency)
         seed: Random seed for reproducible sharding and sampling
         allow_padding: Whether to allow padding of indices to valid range [0, max_length - 1]
-        fine_phase_only: If True, only sample steps in the labelled fine (close-range)
-            phase of each episode (heatmap sidecar labels: fine_phase & label_ok).
-            Episodes without heatmap labels are skipped entirely.
+        perception_labels_only: If True, sample every frame represented by a
+            heatmap-label sidecar. Episodes without labels are skipped entirely.
 
     Example:
         >>> dataset = ShardedSingleStepDataset(
@@ -168,11 +166,11 @@ class ShardedSingleStepDataset(ShardedDataset):
         episode_sampling_rate: float = 0.1,
         seed: int = 42,
         allow_padding: bool = False,
-        fine_phase_only: bool = False,
+        perception_labels_only: bool = False,
     ):
         """Initialize single-step dataset with sharding configuration."""
         super().__init__(dataset_path)
-        self.fine_phase_only = fine_phase_only
+        self.perception_labels_only = perception_labels_only
         self.embodiment_tag = embodiment_tag
         self.modality_configs = modality_configs
         self.video_backend = video_backend
@@ -218,16 +216,16 @@ class ShardedSingleStepDataset(ShardedDataset):
             f"No valid trajectories found for dataset {self.dataset_path}"
         )
 
-        # Valid step indices per episode (all steps, or fine-phase-only steps).
+        # Valid step indices per episode (all steps, or sidecar-labelled steps).
         episode_step_indices = {
             ep_idx: self.get_valid_step_indices(ep_idx) for ep_idx in shuffled_episode_indices
         }
         episode_step_indices = {k: v for k, v in episode_step_indices.items() if len(v) > 0}
-        if self.fine_phase_only:
+        if self.perception_labels_only:
             n_skipped = len(shuffled_episode_indices) - len(episode_step_indices)
             print(
-                f"fine_phase_only: {len(episode_step_indices)} episodes with labelled "
-                f"fine-phase steps ({n_skipped} episodes skipped)"
+                f"perception_labels_only: {len(episode_step_indices)} episodes with "
+                f"labelled steps ({n_skipped} episodes skipped)"
             )
         shuffled_episode_indices = [
             ep_idx for ep_idx in shuffled_episode_indices if ep_idx in episode_step_indices
@@ -235,8 +233,8 @@ class ShardedSingleStepDataset(ShardedDataset):
         assert len(shuffled_episode_indices) > 0, (
             f"No valid steps found for dataset {self.dataset_path}"
             + (
-                " (fine_phase_only=True: are heatmap_labels/ present?)"
-                if self.fine_phase_only
+                " (perception_labels_only=True: are heatmap_labels/ present?)"
+                if self.perception_labels_only
                 else ""
             )
         )
@@ -284,11 +282,11 @@ class ShardedSingleStepDataset(ShardedDataset):
         """Step indices of an episode eligible for sampling.
 
         Default: all steps up to the effective length (action horizon respected).
-        With fine_phase_only: only steps in the labelled fine phase (heatmap sidecar
-        labels); episodes without labels yield an empty array.
+        With perception_labels_only: all steps represented in the label sidecar;
+        episodes without labels yield an empty array.
         """
         effective_length = self.get_effective_episode_length(episode_index)
-        if not self.fine_phase_only:
+        if not self.perception_labels_only:
             return np.arange(0, effective_length)
         mask = self.episode_loader.get_heatmap_step_mask(episode_index)
         if mask is None:

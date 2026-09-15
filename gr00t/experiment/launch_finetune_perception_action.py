@@ -16,7 +16,7 @@
 # Launch finetuning of the PERCEPTION-CONDITIONED ACTION model for the short-range
 # fine approach: wrist-only VLM backbone + target heatmap head + flow-matching
 # action head, where the perception output is cast into conditioning tokens the
-# DiT attends to. Trains on fine-phase frames only (heatmap_labels/ sidecar).
+# DiT attends to. Trains on every frame in the heatmap_labels/ sidecar.
 
 import os
 
@@ -136,8 +136,10 @@ if __name__ == "__main__":
     config.training.save_total_limit = ft_config.save_total_limit
     config.training.num_gpus = ft_config.num_gpus
     config.training.use_wandb = ft_config.use_wandb
-    # fine_phase_only=True below, so the epoch is counted over the sidecar labels.
-    config.training.max_steps = resolve_max_steps(ft_config, embodiment_tag, fine_phase_only=True)
+    # Count all sidecar frames, matching perception_labels_only below.
+    config.training.max_steps = resolve_max_steps(
+        ft_config, embodiment_tag, perception_labels_only=True
+    )
     config.training.weight_decay = ft_config.weight_decay
     config.training.warmup_ratio = ft_config.warmup_ratio
     config.training.wandb_project = ft_config.wandb_project
@@ -147,8 +149,8 @@ if __name__ == "__main__":
     config.data.shard_size = ft_config.shard_size
     config.data.episode_sampling_rate = ft_config.episode_sampling_rate
     config.data.num_shards_per_epoch = ft_config.num_shards_per_epoch
-    # Train only on the labelled fine-phase (close-range) frames, matching the
-    # perception model this one is initialized from.
-    config.data.fine_phase_only = True
+    # Train on every sidecar frame, matching the perception model this one is
+    # initialized from.
+    config.data.perception_labels_only = True
 
     run(config)

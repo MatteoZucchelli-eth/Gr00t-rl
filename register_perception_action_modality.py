@@ -18,8 +18,8 @@ close-range specialist — the coarse approach stays with the full VLA. Adding t
 ego view means generalizing the head to slice one image's tokens out of several;
 see PERCEPTION_ACTION_FINETUNE.md.
 
-Auxiliary per-frame labels (heatmap_labels/ sidecar: u, v, visible, fine_phase,
-label_ok, depth_z, wall_normal_cam_*) are NOT modalities — they arrive through
+Auxiliary per-frame labels (heatmap_labels/ sidecar: u, v, visible, label_ok,
+depth_z, wall_normal_cam_*) are NOT modalities — they arrive through
 VLAStepData.metadata; see LeRobotEpisodeLoader._load_heatmap_labels.
 """
 

@@ -53,8 +53,7 @@ extrinsics. Both are RECOVERED FROM THE DATASET rather than assumed:
 
 The result is a BEST CASE and is inflated before being recommended: the perception
 model is only exercised here with a stationary camera and only over the near part
-of the training range, whereas the new model runs it every frame, while moving,
-out to the full fine-phase distance.
+of the training range, whereas the new model runs it every frame while moving.
 
 Usage:
     python scripts/calibrate_perception_conditioning.py \
@@ -109,16 +108,15 @@ def load_dataset_geometry(dataset_path: Path, max_episodes: int, cx: float, cy: 
         "depth_z",
         "ray_dist",
         "tip_target_dist",
-        "fine_phase",
         "label_ok",
         "visible",
     ]
     labels, cam_pts, tip_pts, train_dist = [], [], [], []
     for label_path in sample:
         lab = pd.read_parquet(label_path, columns=cols)
-        fine = lab[lab["fine_phase"] & lab["label_ok"]].dropna(subset=["tip_target_dist"])
-        train_dist.append(fine["tip_target_dist"])
-        vis = fine[fine["visible"]].dropna(subset=["u", "v", "depth_z", "ray_dist"])
+        valid = lab[lab["label_ok"]].dropna(subset=["tip_target_dist"])
+        train_dist.append(valid["tip_target_dist"])
+        vis = valid[valid["visible"]].dropna(subset=["u", "v", "depth_z", "ray_dist"])
         if vis.empty:
             continue
         labels.append(vis)
@@ -302,7 +300,7 @@ def main() -> None:
     )
     print(
         "\nIf you have the perception run's own `uv_err_px_metric` from wandb, prefer it "
-        "for the\nuv figure: it covers every fine-phase frame, moving ones included, "
+        "for the\nuv figure: it covers every labelled frame, moving ones included, "
         "which this eval does not."
     )
 
