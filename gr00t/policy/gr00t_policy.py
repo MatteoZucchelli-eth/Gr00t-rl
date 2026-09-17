@@ -483,62 +483,7 @@ class Gr00tPolicy(BasePolicy):
         if "tip_target_pred" in model_pred:
             info["tip_target_pred"] = model_pred["tip_target_pred"].float().cpu().numpy()  # [B, 9]
 
-        info.update(self._perception_info(model_pred, observation))
-
         return casted_action, info
-
-    def _perception_info(
-        self, model_pred: dict[str, Any], observation: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Perception outputs of a perception-conditioned model (Gr00tN1d7PerceptionAction).
-
-        That model surfaces the target estimate its action chunk was conditioned on
-        alongside the chunk itself, so a deployment can log or gate on it without a
-        second forward pass. Key names match PerceptionPolicy's, so robot-side code
-        reads the perception-only server and this one the same way — except
-        `visible`, which is left to the caller: no threshold is defined here, and
-        `visibility` is the probability it would be compared against.
-
-        Empty for every other model.
-        """
-        if "target_uv" not in model_pred:
-            return {}
-
-        uv_processed = model_pred["target_uv"].float().cpu()  # (B, 2) processed-image px
-        info: dict[str, Any] = {
-            "target_uv_processed_px": uv_processed.numpy().astype(np.float32),
-        }
-
-        # Map back to RAW camera px using each sample's own frame size — the
-        # processed-px value is meaningless to a caller that never saw the crop.
-        if hasattr(self.model, "uv_processed_to_camera"):
-            video_key = self.modality_configs["video"].modality_keys[0]
-            frames = observation["video"][video_key]  # (B, T, H, W, C)
-            info["target_uv_px"] = (
-                torch.stack(
-                    [
-                        self.model.uv_processed_to_camera(
-                            uv_processed[i : i + 1],
-                            camera_size=(int(frames[i].shape[2]), int(frames[i].shape[1])),
-                        )[0]
-                        for i in range(uv_processed.shape[0])
-                    ]
-                )
-                .numpy()
-                .astype(np.float32)
-            )
-
-        # visibility (B,), target_depth_m (B,), wall_normal_cam (B, 3), and the full
-        # softmax heatmap (B, gh, gw) when options={"return_heatmap": True}.
-        for pred_key, info_key in (
-            ("visibility", "visibility"),
-            ("target_depth", "target_depth_m"),
-            ("wall_normal", "wall_normal_cam"),
-            ("heatmap", "heatmap"),
-        ):
-            if pred_key in model_pred:
-                info[info_key] = model_pred[pred_key].float().cpu().numpy().astype(np.float32)
-        return info
 
     def check_action(self, action: dict[str, Any]) -> None:
         """Validate that the action has the correct structure and types.
