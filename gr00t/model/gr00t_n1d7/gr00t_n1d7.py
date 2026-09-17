@@ -57,6 +57,30 @@ def _masked_mean_pool(
     return (embeds * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
 
 
+def _view_token_mask(image_mask: torch.Tensor, num_views: int, view_index: int) -> torch.Tensor:
+    """Bool (B, S) mask selecting the image tokens belonging to one camera view.
+
+    Each image the VLM is given becomes ONE contiguous run of image tokens, and the
+    chat template separates consecutive images with <|vision_start|>/<|vision_end|>
+    specials, so runs never touch. Runs therefore appear in exactly the order the
+    processor stacked them -- (T, V) stacked then flattened, i.e. view index cycles
+    fastest -- and run k belongs to view `k % num_views`.
+
+    Deriving the split from run structure rather than from a token count is deliberate:
+    the tokens-per-image depends on Qwen's smart-resize rounding, and the number of
+    stacked timesteps depends on the modality config's video delta_indices -- 1 for
+    register_autocollect_modality.py's default [0], 2 for register_new_modality.py's
+    [-1, 0], and settable per run via GR00T_VIDEO_DELTA. Neither is visible from here,
+    and this works for any of them.
+    """
+    if num_views <= 1:
+        return torch.zeros_like(image_mask, dtype=torch.bool)
+    img = image_mask.bool()
+    prev = F.pad(img[:, :-1], (1, 0), value=False)
+    run_id = torch.cumsum((img & ~prev).long(), dim=1) - 1
+    return img & (run_id.remainder(num_views) == view_index)
+
+
 class TipTargetHead(nn.Module):
     """Auxiliary head predicting the target pose in the end-effector (tip) frame.
 
@@ -73,14 +97,32 @@ class TipTargetHead(nn.Module):
     -- teacher-forced on ground truth during training, fed its own prediction
     at inference.
 
-    `pool="mean"` selects the original masked-mean pooling (no learned queries,
-    predictor takes a single `latent_dim` vector instead of
-    `num_queries * latent_dim`). Both modes are supported and selectable with
-    `--tip-target-pool`; which one is actually better here is untested -- the
-    only checkpoint trained with "mean" differed from the "attn" one in the loss
-    as well, so the comparison was confounded. Note the predictor input widths
-    differ, so a checkpoint trained with one pool cannot be resumed with the
-    other.
+    Two pooling modes:
+
+      "attn_residual" (default)  `num_queries` learned query tokens cross-attend over
+                                 the whole sequence, PLUS the masked-mean vector added
+                                 back to every pooled query, with the attention's output
+                                 projection zero-initialized.
+      "mean"                     masked mean over all valid tokens.
+
+    The residual is not optional dressing. Without it the pool is a single
+    cross-attention layer with no skip connection and no FFN, whose queries start as
+    random vectors: the softmax begins near-uniform over the whole sequence, so training
+    starts at "a mean pool seen through an untrained 16.8M-parameter random projection"
+    (at latent_dim 2048) and has to climb out of it, and the gradient reaching the
+    backbone is routed by whatever those random queries happened to attend to. With the
+    residual the head starts at exactly the mean-pool solution, the mean path carries
+    gradient to every token from step 0, and the attention only ever learns a
+    correction. It is strictly the better-conditioned parameterization of the same
+    function class.
+
+    The bare no-residual variant was removed. A checkpoint trained with it still LOADS
+    here (identical parameter shapes), but it will not behave identically, because the
+    mean vector is now added in the forward pass.
+
+    "mean" is not weight-compatible with "attn_residual" -- the predictor input widths
+    differ (`num_queries * latent_dim` vs `latent_dim`) -- so a checkpoint trained with
+    one cannot be resumed with the other.
     """
 
     def __init__(
@@ -92,14 +134,18 @@ class TipTargetHead(nn.Module):
         xyz_scale: float,
         num_queries: int = 4,
         num_attn_heads: int = 8,
-        pool: str = "attn",
+        pool: str = "attn_residual",
     ):
         super().__init__()
-        if pool not in ("attn", "mean"):
-            raise ValueError(f"tip_target_pool must be 'attn' or 'mean', got {pool!r}")
+        if pool not in ("mean", "attn_residual"):
+            raise ValueError(
+                f"tip_target_pool must be 'attn_residual' or 'mean', got {pool!r}. "
+                "The bare no-residual 'attn' pool was removed: it is the same function "
+                "class without the skip connection that makes it trainable."
+            )
         self.xyz_scale = xyz_scale
         self.pool = pool
-        if pool == "attn":
+        if pool != "mean":
             self.pool_queries = nn.Parameter(torch.randn(num_queries, latent_dim) * 0.02)
             self.pool_attn = nn.MultiheadAttention(latent_dim, num_attn_heads, batch_first=True)
             self.pool_norm = nn.LayerNorm(latent_dim)
@@ -124,6 +170,7 @@ class TipTargetHead(nn.Module):
             )
         else:
             self.cond_embed = None
+        self._zero_init_residual_path()
 
     def reset_parameters(self) -> None:
         """Re-initialize every parameter of the head to its intended fresh state.
@@ -135,29 +182,56 @@ class TipTargetHead(nn.Module):
         (they come back as uninitialized/zero memory -- garbage queries NaN the
         attention softmax on the first forward).
         """
-        if self.pool == "attn":
+        if self.pool != "mean":
             with torch.no_grad():
                 self.pool_queries.normal_(0.0, 0.02)
             self.pool_attn._reset_parameters()
             self.pool_norm.reset_parameters()
+            self._zero_init_residual_path()
         for module in list(self.predictor) + (list(self.cond_embed) if self.cond_embed else []):
             if isinstance(module, nn.Linear):
                 module.reset_parameters()
 
+    def _zero_init_residual_path(self) -> None:
+        """Zero the attention's output projection so the pool starts as a mean pool."""
+        if self.pool != "attn_residual":
+            return
+        with torch.no_grad():
+            self.pool_attn.out_proj.weight.zero_()
+            if self.pool_attn.out_proj.bias is not None:
+                self.pool_attn.out_proj.bias.zero_()
+
     def predict_scaled(
-        self, vl_embeds: torch.Tensor, attention_mask: torch.Tensor | None = None
+        self,
+        vl_embeds: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        hide_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Predict the scaled 9d target (xyz / xyz_scale, raw rot6d), shape (B, 9)."""
+        """Predict the scaled 9d target (xyz / xyz_scale, raw rot6d), shape (B, 9).
+
+        `hide_tokens` is an optional bool (B, S) mask of tokens this head must not
+        read -- used to hide the wrist view so the head has to fall back on the ego
+        camera. It narrows THIS head's view only; the rest of the model still gets
+        the full sequence.
+        """
+        valid = None if attention_mask is None else attention_mask.bool()
+        if hide_tokens is not None:
+            keep = ~hide_tokens.bool()
+            valid = keep if valid is None else (valid & keep)
+
+        mean_vec = _masked_mean_pool(vl_embeds, valid)
         if self.pool == "mean":
-            return self.predictor(_masked_mean_pool(vl_embeds, attention_mask))
+            return self.predictor(mean_vec)
+
         queries = (
             self.pool_queries.to(vl_embeds.dtype).unsqueeze(0).expand(vl_embeds.shape[0], -1, -1)
         )
-        # key_padding_mask: True = ignore that token (padding).
-        key_padding_mask = None if attention_mask is None else ~attention_mask.bool()
+        # key_padding_mask: True = ignore that token (padding, or a hidden view).
+        key_padding_mask = None if valid is None else ~valid
         pooled, _ = self.pool_attn(
             queries, vl_embeds, vl_embeds, key_padding_mask=key_padding_mask, need_weights=False
         )
+        pooled = pooled + mean_vec.unsqueeze(1)
         return self.predictor(self.pool_norm(pooled).flatten(1))
 
     def scale(self, tip_target_9d: torch.Tensor) -> torch.Tensor:
@@ -244,17 +318,51 @@ class Gr00tN1d7ActionHead(nn.Module):
         self.use_tip_target_head = getattr(config, "use_tip_target_head", False)
         if self.use_tip_target_head:
             self.tip_target_loss_weight = config.tip_target_loss_weight
-            self.tip_target_loss_type = getattr(config, "tip_target_loss_type", "mse")
-            if self.tip_target_loss_type not in ("mse", "rel_abs"):
-                raise ValueError(
-                    "tip_target_loss_type must be 'mse' or 'rel_abs', "
-                    f"got {self.tip_target_loss_type!r}"
-                )
-            self.tip_target_pos_loss_weight = getattr(config, "tip_target_pos_loss_weight", 1.0)
-            self.tip_target_pos_abs_weight = getattr(config, "tip_target_pos_abs_weight", 0.2)
+            self.tip_target_lat_loss_weight = getattr(
+                config, "tip_target_lat_loss_weight", 2.0 / 3.0
+            )
+            self.tip_target_depth_loss_weight = getattr(
+                config, "tip_target_depth_loss_weight", 1.0 / 3.0
+            )
             self.tip_target_rot_loss_weight = getattr(config, "tip_target_rot_loss_weight", 1.0)
-            self.tip_target_dist_floor = getattr(config, "tip_target_dist_floor", 0.05)
+            self.tip_target_wrist_mask_prob = getattr(config, "tip_target_wrist_mask_prob", 0.0)
+            self.tip_target_num_views = int(getattr(config, "tip_target_num_views", 2))
+            self.tip_target_wrist_view_index = int(
+                getattr(config, "tip_target_wrist_view_index", 1)
+            )
             self.use_tip_target_conditioning = config.use_tip_target_conditioning
+            # Camera axes in the tip frame, rows (X, Y, Z=optical axis). Used to rotate
+            # the position residual out of the label's frame into the observable one
+            # before the lateral/depth split -- tip-frame z is NOT depth.
+            cam_axes = torch.tensor(
+                getattr(
+                    config,
+                    "tip_target_cam_axes",
+                    [
+                        [0.4281, -0.0108, 0.9037],
+                        [-0.0057, -0.9999, -0.0093],
+                        [0.9037, -0.0012, -0.4281],
+                    ],
+                ),
+                dtype=torch.float32,
+            )
+            self.register_buffer("tip_target_cam_axes", cam_axes, persistent=False)
+            # --- Scheduled sampling of the conditioning token (see the config). ---
+            self.tip_target_tf_gate_mm = getattr(config, "tip_target_tf_gate_mm", None)
+            self.tip_target_tf_ramp_steps = max(
+                1, int(getattr(config, "tip_target_tf_ramp_steps", 2000))
+            )
+            self.tip_target_tf_max_pred_prob = getattr(config, "tip_target_tf_max_pred_prob", 1.0)
+            self.tip_target_tf_gate_patience = int(
+                getattr(config, "tip_target_tf_gate_patience", 200)
+            )
+            self.tip_target_tf_gate_ema = getattr(config, "tip_target_tf_gate_ema", 0.99)
+            # Persistent so a time-limited Euler job resumes the schedule instead of
+            # restarting it. -1 in tf_open_step means "gate still closed".
+            self.register_buffer("tip_target_tf_err_ema", torch.tensor(float("nan")))
+            self.register_buffer("tip_target_tf_hold", torch.tensor(0, dtype=torch.long))
+            self.register_buffer("tip_target_tf_open_step", torch.tensor(-1, dtype=torch.long))
+            self.register_buffer("tip_target_tf_step", torch.tensor(0, dtype=torch.long))
             self.tip_target_head = TipTargetHead(
                 latent_dim=config.backbone_embedding_dim,
                 hidden_dim=config.tip_target_hidden_dim,
@@ -263,7 +371,7 @@ class Gr00tN1d7ActionHead(nn.Module):
                 xyz_scale=config.tip_target_xyz_scale,
                 num_queries=getattr(config, "tip_target_num_queries", 4),
                 num_attn_heads=getattr(config, "tip_target_attn_heads", 8),
-                pool=getattr(config, "tip_target_pool", "attn"),
+                pool=getattr(config, "tip_target_pool", "attn_residual"),
             )
             # Teacher-forcing noise std in the head's scaled space: metric xyz
             # noise is divided by xyz_scale, rot6d noise is used as-is.
@@ -339,6 +447,82 @@ class Gr00tN1d7ActionHead(nn.Module):
         backbone_features = self.vl_self_attention(backbone_features)
         backbone_output["backbone_features"] = backbone_features
         return backbone_output
+
+    def _tip_target_pos_residual_cam(
+        self, pred_scaled: torch.Tensor, tgt_scaled: torch.Tensor
+    ) -> torch.Tensor:
+        """Position residual in METRES, rotated into the camera frame, shape (N, 3).
+
+        Columns are (lateral X, lateral Y, depth Z). The rotation is a constant -- the
+        wrist camera and the drill tip share a link -- recovered by Kabsch over the
+        heatmap sidecar with an rms residual of 1.18 mm.
+        """
+        resid_tip = (pred_scaled[:, :3] - tgt_scaled[:, :3]) * self.tip_target_head.xyz_scale
+        axes = self.tip_target_cam_axes.to(resid_tip.dtype)
+        return resid_tip @ axes.transpose(0, 1)
+
+    def _tip_target_pred_prob(self, pos_err_mm: torch.Tensor) -> float:
+        """Advance the scheduled-sampling schedule and return P(condition on prediction).
+
+        The gate watches an EMA of the head's mean position error, opens once that EMA
+        has held under `tip_target_tf_gate_mm` for `tip_target_tf_gate_patience` steps,
+        and never closes again. After it opens the probability ramps linearly to
+        `tip_target_tf_max_pred_prob`.
+
+        `pos_err_mm` is all-reduced BEFORE it touches the EMA, so every rank drives an
+        identical schedule. Reducing the metric rather than the decision is deliberate:
+        if two ranks disagreed about whether the gate is open they would feed different
+        conditioning tokens for the same optimizer step and their gradients would
+        diverge.
+        """
+        if self.tip_target_tf_gate_mm is None:
+            return 0.0
+
+        err = pos_err_mm.detach().float()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            err = err.clone()
+            torch.distributed.all_reduce(err, op=torch.distributed.ReduceOp.AVG)
+
+        with torch.no_grad():
+            self.tip_target_tf_step += 1
+            prev = self.tip_target_tf_err_ema
+            decay = self.tip_target_tf_gate_ema
+            self.tip_target_tf_err_ema.copy_(
+                err if torch.isnan(prev) else decay * prev + (1.0 - decay) * err
+            )
+            if self.tip_target_tf_open_step.item() < 0:
+                if self.tip_target_tf_err_ema.item() < self.tip_target_tf_gate_mm:
+                    self.tip_target_tf_hold += 1
+                else:
+                    self.tip_target_tf_hold.zero_()
+                if self.tip_target_tf_hold.item() >= self.tip_target_tf_gate_patience:
+                    self.tip_target_tf_open_step.copy_(self.tip_target_tf_step)
+                    logger.info(
+                        "tip-target teacher forcing: gate opened at step %d "
+                        "(EMA position error %.2f mm < %.2f mm); ramping to p=%.2f over "
+                        "%d steps",
+                        int(self.tip_target_tf_step.item()),
+                        self.tip_target_tf_err_ema.item(),
+                        self.tip_target_tf_gate_mm,
+                        self.tip_target_tf_max_pred_prob,
+                        self.tip_target_tf_ramp_steps,
+                    )
+
+            opened = self.tip_target_tf_open_step.item()
+            if opened < 0:
+                return 0.0
+            progress = (self.tip_target_tf_step.item() - opened) / self.tip_target_tf_ramp_steps
+        return self.tip_target_tf_max_pred_prob * min(1.0, max(0.0, progress))
+
+    def _tip_target_pred_prob_readonly(self) -> float:
+        """The scheduled-sampling probability without advancing the schedule (eval)."""
+        if self.tip_target_tf_gate_mm is None:
+            return 0.0
+        opened = self.tip_target_tf_open_step.item()
+        if opened < 0:
+            return 0.0
+        progress = (self.tip_target_tf_step.item() - opened) / self.tip_target_tf_ramp_steps
+        return self.tip_target_tf_max_pred_prob * min(1.0, max(0.0, progress))
 
     def _tip_target_cond_token(self, scaled_9d: torch.Tensor) -> torch.Tensor | None:
         """Build the tip-target conditioning token from a scaled 9d value, shape (B, 9)."""
@@ -423,9 +607,32 @@ class Gr00tN1d7ActionHead(nn.Module):
         tip_pred_scaled = None
         tip_target_scaled = None
         tip_valid = None
+        tip_pred_prob = 0.0
         tip_target = action_input.get("tip_target_9d", None)
         if self.use_tip_target_head:
-            tip_pred_scaled = self.tip_target_head.predict_scaled(vl_embeds, vl_attn_mask)
+            # Optionally hide the wrist view from THIS head only, so it has to read the
+            # target out of the ego camera. Meaningful because the backbone is causal
+            # and ego tokens precede wrist ones: ego representations are wrist-free.
+            hide_tokens = None
+            if self.training and self.tip_target_wrist_mask_prob > 0.0:
+                image_mask = getattr(backbone_output, "image_mask", None)
+                if image_mask is None:
+                    raise ValueError(
+                        "tip_target_wrist_mask_prob > 0 needs the backbone's image_mask, "
+                        "which this backbone did not return."
+                    )
+                wrist_tokens = _view_token_mask(
+                    image_mask, self.tip_target_num_views, self.tip_target_wrist_view_index
+                )
+                drop = (
+                    torch.rand(vl_embeds.shape[0], 1, device=vl_embeds.device)
+                    < self.tip_target_wrist_mask_prob
+                )
+                hide_tokens = wrist_tokens & drop
+
+            tip_pred_scaled = self.tip_target_head.predict_scaled(
+                vl_embeds, vl_attn_mask, hide_tokens=hide_tokens
+            )
             tip_cond_value = tip_pred_scaled.detach()
             if tip_target is not None:
                 tip_target_scaled = self.tip_target_head.scale(
@@ -437,7 +644,40 @@ class Gr00tN1d7ActionHead(nn.Module):
                     teacher_value = teacher_value + self.tip_target_cond_noise_std.to(
                         teacher_value.dtype
                     ) * torch.randn_like(teacher_value)
-                tip_cond_value = torch.where(tip_valid, teacher_value, tip_cond_value)
+
+                # Scheduled sampling: hand the conditioning token over to the head's own
+                # prediction once the head is good enough (see _tip_target_pred_prob).
+                # The schedule only ADVANCES while training, but the probability it has
+                # reached is honoured in eval too, so the two losses stay comparable.
+                if self.tip_target_tf_gate_mm is not None:
+                    # Gate on rows the head saw in full. A wrist-masked row is ~12x
+                    # worse by construction (blanking the wrist view moved measured
+                    # tip error 5.6 -> 68 mm), so counting those would hold the gate
+                    # shut forever whenever tip_target_wrist_mask_prob > 0 -- the two
+                    # features would silently cancel each other out.
+                    gate_rows = tip_valid.squeeze(-1)
+                    if hide_tokens is not None:
+                        gate_rows = gate_rows & ~hide_tokens.any(dim=-1)
+                    if self.training:
+                        if gate_rows.any():
+                            resid_cam = self._tip_target_pos_residual_cam(
+                                tip_pred_scaled[gate_rows].detach(),
+                                tip_target_scaled[gate_rows],
+                            )
+                            pos_err_mm = resid_cam.norm(dim=-1).mean() * 1000.0
+                        else:
+                            pos_err_mm = self.tip_target_tf_err_ema
+                        tip_pred_prob = self._tip_target_pred_prob(pos_err_mm)
+                    else:
+                        tip_pred_prob = self._tip_target_pred_prob_readonly()
+
+                use_teacher = tip_valid
+                if tip_pred_prob > 0.0:
+                    keep_teacher = (
+                        torch.rand(tip_valid.shape, device=tip_valid.device) >= tip_pred_prob
+                    )
+                    use_teacher = tip_valid & keep_teacher
+                tip_cond_value = torch.where(use_teacher, teacher_value, tip_cond_value)
             tip_cond_token = self._tip_target_cond_token(tip_cond_value)
             if tip_cond_token is not None:
                 state_features = torch.cat((state_features, tip_cond_token), dim=1)
@@ -491,50 +731,77 @@ class Gr00tN1d7ActionHead(nn.Module):
             "state_features": state_features,
         }
 
-        # Tip-target head loss over rows with a resolved label. Two objectives,
-        # selected by `tip_target_loss_type` (see the model config for the
-        # measurements behind the default):
-        #   "mse":     the two per-part MSEs (xyz, rot6d) averaged 50/50.
-        #   "rel_abs": xyz error normalized by the (clamped) distance to target
-        #              plus an absolute anchor, and a separate rot6d MSE.
-        # The per-part MSEs are always logged as diagnostics so the two
-        # objectives stay comparable on the same wandb panels.
+        # Tip-target head loss over rows with a resolved label.
+        #
+        # The position error is split into a LATERAL and a DEPTH term, weighted
+        # independently, because the two are not equally learnable: lateral error is
+        # read straight off the image (1 processed px = 0.381 mm at the median 148 mm
+        # working depth) while depth has to be inferred from apparent size and
+        # perspective (the target spans 53-225 mm of camera depth, sd 30.0 mm).
+        #
+        # The split is taken in the CAMERA frame, not the label's. Kabsch over 44.7k
+        # (sidecar u/v/depth_z, next.tip_target_9d) pairs -- rigid, rms 1.18 mm -- puts
+        # the optical axis at [0.9037, -0.0012, -0.4281] in the tip frame, so tip-frame
+        # `z` is NOT depth: depth is 0.9037*x - 0.4281*z. Splitting the label's own
+        # x,y vs z would leave 90% of the depth direction inside the lateral term.
+        #
+        # A rotation preserves the L2 norm, so the default 2/3 + 1/3 weighting is
+        # numerically identical to the single xyz MSE this replaced. Only a deliberate
+        # reweighting changes training.
         if self.use_tip_target_head and tip_pred_scaled is not None:
             outputs["tip_target_pred"] = self.tip_target_head.unscale(
                 tip_pred_scaled, orthonormalize=True
             )
+            if self.tip_target_tf_gate_mm is not None:
+                outputs["tip_target_cond_pred_prob"] = torch.tensor(
+                    tip_pred_prob, device=vl_embeds.device
+                )
             if tip_target_scaled is not None and tip_valid is not None and tip_valid.any():
                 valid_rows = tip_valid.squeeze(-1)
                 pred_v = tip_pred_scaled[valid_rows]
                 tgt_v = tip_target_scaled[valid_rows]
-                tip_pos_abs_loss = F.mse_loss(pred_v[:, :3], tgt_v[:, :3])
-                tip_rot_loss = F.mse_loss(pred_v[:, 3:], tgt_v[:, 3:])
-                outputs["tip_target_pos_abs_loss"] = tip_pos_abs_loss
-                outputs["tip_target_rot_loss"] = tip_rot_loss
 
-                if self.tip_target_loss_type == "mse":
-                    # Mean of the two per-part MSEs, which weights xyz and rot6d
-                    # equally. NOT F.mse_loss(pred_v, tgt_v) over all 9 dims: that
-                    # averages over 6 rot6d dims and 3 xyz dims, so it hands rot6d
-                    # twice the weight purely as an artefact of the vector layout.
-                    tip_target_loss = 0.5 * tip_pos_abs_loss + 0.5 * tip_rot_loss
-                else:
-                    xyz_scale = self.tip_target_head.xyz_scale
-                    xyz_residual_m = (pred_v[:, :3] - tgt_v[:, :3]) * xyz_scale
-                    dist_m = torch.linalg.vector_norm(
-                        tgt_v[:, :3] * xyz_scale, dim=-1, keepdim=True
-                    )
-                    rel_residual = xyz_residual_m / dist_m.clamp_min(self.tip_target_dist_floor)
-                    tip_pos_rel_loss = rel_residual.pow(2).mean()
-                    tip_pos_loss = (
-                        tip_pos_rel_loss + self.tip_target_pos_abs_weight * tip_pos_abs_loss
-                    )
-                    tip_target_loss = (
-                        self.tip_target_pos_loss_weight * tip_pos_loss
-                        + self.tip_target_rot_loss_weight * tip_rot_loss
-                    )
-                    outputs["tip_target_pos_loss"] = tip_pos_loss
-                    outputs["tip_target_pos_rel_loss"] = tip_pos_rel_loss
+                # Metres, camera frame: columns (lateral X, lateral Y, depth Z).
+                resid_cam = self._tip_target_pos_residual_cam(pred_v, tgt_v)
+                scale_sq = self.tip_target_head.xyz_scale**2
+                # Divide back by xyz_scale^2 so the terms stay in the head's scaled
+                # space and the loss magnitude matches the objective this replaced.
+                tip_lat_loss = resid_cam[:, :2].pow(2).mean() / scale_sq
+                tip_depth_loss = resid_cam[:, 2].pow(2).mean() / scale_sq
+                tip_rot_loss = F.mse_loss(pred_v[:, 3:], tgt_v[:, 3:])
+
+                tip_pos_loss = (
+                    self.tip_target_lat_loss_weight * tip_lat_loss
+                    + self.tip_target_depth_loss_weight * tip_depth_loss
+                )
+                tip_target_loss = tip_pos_loss + self.tip_target_rot_loss_weight * tip_rot_loss
+
+                outputs["tip_target_lat_loss"] = tip_lat_loss
+                outputs["tip_target_depth_loss"] = tip_depth_loss
+                outputs["tip_target_pos_loss"] = tip_pos_loss
+                outputs["tip_target_rot_loss"] = tip_rot_loss
+                # Interpretable companions, in millimetres, so the wandb panels say
+                # something a person can act on rather than a scaled-space square.
+                outputs["tip_target_lat_err_mm"] = (
+                    resid_cam[:, :2].norm(dim=-1).mean().detach() * 1000.0
+                )
+                outputs["tip_target_depth_err_mm"] = resid_cam[:, 2].abs().mean().detach() * 1000.0
+                pos_err_mm_rows = resid_cam.norm(dim=-1).detach() * 1000.0
+                outputs["tip_target_pos_err_mm"] = pos_err_mm_rows.mean()
+                # With wrist masking on, the batch mixes "saw both views" rows with
+                # ego-only rows whose error is ~12x larger. Averaging them makes the
+                # headline metric uninterpretable and hides the thing worth watching:
+                # whether the ego-only error is coming down.
+                if hide_tokens is not None:
+                    masked_rows = hide_tokens.any(dim=-1)[valid_rows]
+                    if masked_rows.any():
+                        outputs["tip_target_pos_err_egoonly_mm"] = pos_err_mm_rows[
+                            masked_rows
+                        ].mean()
+                    if (~masked_rows).any():
+                        outputs["tip_target_pos_err_bothviews_mm"] = pos_err_mm_rows[
+                            ~masked_rows
+                        ].mean()
                 outputs["tip_target_loss"] = tip_target_loss
                 outputs["loss"] = outputs["loss"] + self.tip_target_loss_weight * tip_target_loss
 

@@ -321,3 +321,275 @@ class TestTipTargetHead:
         raw = self._tip_target()
         assert torch.allclose(head.unscale(head.scale(raw)), raw, atol=1e-6)
         assert torch.allclose(head.scale(raw)[..., :3], raw[..., :3] / 0.1)
+
+
+class TestTipTargetCameraFrameLoss:
+    """The position loss is split lateral-vs-depth in the CAMERA frame.
+
+    Tip-frame `z` is not depth: the optical axis sits at [0.9037, -0.0012, -0.4281] in
+    the tip frame (Kabsch over the heatmap sidecar, rigid, rms 1.18 mm), so depth is
+    0.9037*x - 0.4281*z. These tests pin the two properties that make the split safe to
+    land: it is a no-op at the default weights, and it actually isolates depth.
+    """
+
+    @staticmethod
+    def _config(**overrides):
+        defaults = dict(use_tip_target_head=True, tip_target_loss_weight=0.5)
+        defaults.update(overrides)
+        return _small_config(**defaults)
+
+    def _run(self, config, seed=0):
+        torch.manual_seed(seed)
+        head = Gr00tN1d7ActionHead(config)
+        head.train()
+        action_input = _make_action_input(config)
+        target = torch.randn(2, 9) * 0.1
+        target[:, 3:] = torch.nn.functional.normalize(target[:, 3:], dim=-1)
+        action_input["tip_target_9d"] = target
+        torch.manual_seed(seed + 1000)  # same noise draw for both arms
+        return head.forward(_make_backbone_output(config), action_input)
+
+    def test_default_weights_reproduce_the_plain_xyz_mse(self):
+        """2/3 lateral + 1/3 depth == the single xyz MSE it replaced.
+
+        A rotation preserves the L2 norm, so an equally-weighted split of the rotated
+        residual is numerically the same number. This is what lets the split land as
+        instrumentation rather than as a silent change of objective.
+        """
+        out = self._run(self._config())
+        # Reconstruct the old objective from the per-part terms: mean over 3 xyz dims.
+        old_xyz_mse = (2.0 * out["tip_target_lat_loss"] + out["tip_target_depth_loss"]) / 3.0
+        assert torch.allclose(out["tip_target_pos_loss"], old_xyz_mse, atol=1e-6)
+
+    def test_reweighting_depth_changes_the_loss(self):
+        base = self._run(self._config())
+        heavy = self._run(self._config(tip_target_depth_loss_weight=3.0))
+        assert not torch.allclose(base["tip_target_pos_loss"], heavy["tip_target_pos_loss"])
+        # Only the depth term is rescaled; the lateral one is untouched.
+        assert torch.allclose(base["tip_target_lat_loss"], heavy["tip_target_lat_loss"], atol=1e-6)
+
+    def test_millimetre_metrics_are_reported(self):
+        out = self._run(self._config())
+        for key in ("tip_target_lat_err_mm", "tip_target_depth_err_mm", "tip_target_pos_err_mm"):
+            assert key in out and torch.isfinite(out[key])
+        # The full position error is at least as large as either component.
+        assert out["tip_target_pos_err_mm"] >= out["tip_target_depth_err_mm"] - 1e-4
+
+    def test_depth_axis_is_not_tip_z(self):
+        """A pure tip-frame +z error must land mostly in LATERAL, not in depth.
+
+        The optical axis is only -0.4281 along tip z, so a naive x,y-vs-z split would
+        call this a depth error when 90% of it is laterally observable.
+        """
+        from gr00t.model.gr00t_n1d7.gr00t_n1d7 import Gr00tN1d7ActionHead as _AH
+
+        head = _AH(self._config())
+        pred = torch.tensor([[0.0, 0.0, 1.0] + [0.0] * 6])
+        tgt = torch.zeros(1, 9)
+        resid = head._tip_target_pos_residual_cam(pred, tgt)
+        lateral = resid[0, :2].norm().item()
+        depth = resid[0, 2].abs().item()
+        assert depth == pytest.approx(0.4281 * 0.1, abs=1e-4)
+        assert lateral > depth  # most of a tip-z error is laterally observable
+
+
+class TestTipTargetWristMasking:
+    """Hiding the wrist view from the auxiliary head only."""
+
+    def test_view_token_mask_picks_alternating_runs(self):
+        from gr00t.model.gr00t_n1d7.gr00t_n1d7 import _view_token_mask
+
+        # Four image runs separated by a non-image token: ego, wrist, ego, wrist —
+        # the 2-timestep case (register_new_modality.py's [-1, 0]). The single-frame
+        # case that register_autocollect_modality.py now defaults to is the first two
+        # runs of this, and falls out of the same modulo.
+        img = torch.tensor([[1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0]], dtype=torch.bool)
+        wrist = _view_token_mask(img, num_views=2, view_index=1)
+        expected = torch.tensor([[0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0]], dtype=torch.bool)
+        assert torch.equal(wrist, expected)
+        ego = _view_token_mask(img, num_views=2, view_index=0)
+        assert torch.equal(ego | wrist, img)
+        assert not (ego & wrist).any()
+
+    def test_single_view_masks_nothing(self):
+        from gr00t.model.gr00t_n1d7.gr00t_n1d7 import _view_token_mask
+
+        img = torch.tensor([[1, 1, 0, 1, 1]], dtype=torch.bool)
+        assert not _view_token_mask(img, num_views=1, view_index=0).any()
+
+    def test_hidden_tokens_do_not_reach_the_head(self):
+        from gr00t.model.gr00t_n1d7.gr00t_n1d7 import TipTargetHead
+
+        torch.manual_seed(0)
+        head = TipTargetHead(
+            latent_dim=8, hidden_dim=8, cond_dim=8, use_conditioning=False, xyz_scale=0.1
+        )
+        head.eval()
+        embeds = torch.randn(1, 6, 8)
+        mask = torch.ones(1, 6, dtype=torch.bool)
+        hide = torch.tensor([[0, 0, 0, 1, 1, 0]], dtype=torch.bool)
+
+        with torch.no_grad():
+            base = head.predict_scaled(embeds, mask, hide_tokens=hide)
+            # Scribbling over the hidden positions must not move the prediction.
+            scribbled = embeds.clone()
+            scribbled[:, 3:5] = torch.randn(1, 2, 8) * 100
+            other = head.predict_scaled(scribbled, mask, hide_tokens=hide)
+        assert torch.allclose(base, other, atol=1e-5)
+
+    def test_masking_is_training_only(self):
+        config = _small_config(
+            use_tip_target_head=True,
+            tip_target_loss_weight=0.5,
+            tip_target_wrist_mask_prob=1.0,
+        )
+        head = Gr00tN1d7ActionHead(config)
+        head.eval()
+        action_input = _make_action_input(config)
+        del action_input["action"]
+        # eval() must not consult image_mask at all; this would raise if it did.
+        out = head.get_action(_make_backbone_output(config), action_input)
+        assert torch.isfinite(out["tip_target_pred"]).all()
+
+
+class TestTipTargetPoolResidual:
+    """`attn_residual` must start exactly at the mean-pool solution."""
+
+    def test_zero_init_makes_every_query_the_mean_vector(self):
+        from gr00t.model.gr00t_n1d7.gr00t_n1d7 import TipTargetHead, _masked_mean_pool
+
+        torch.manual_seed(0)
+        head = TipTargetHead(
+            latent_dim=8,
+            hidden_dim=8,
+            cond_dim=8,
+            use_conditioning=False,
+            xyz_scale=0.1,
+            num_queries=3,
+            num_attn_heads=2,
+        )
+        head.eval()
+        embeds = torch.randn(2, 5, 8)
+        mask = torch.ones(2, 5, dtype=torch.bool)
+        with torch.no_grad():
+            queries = head.pool_queries.unsqueeze(0).expand(2, -1, -1)
+            pooled, _ = head.pool_attn(queries, embeds, embeds, need_weights=False)
+            assert torch.allclose(pooled, torch.zeros_like(pooled), atol=1e-6)
+            pooled = pooled + _masked_mean_pool(embeds, mask).unsqueeze(1)
+            normed = head.pool_norm(pooled)
+        # Every query slot carries the same thing: the mean-pooled vector.
+        assert torch.allclose(normed[:, 0], normed[:, 1], atol=1e-6)
+        assert torch.allclose(normed[:, 0], normed[:, 2], atol=1e-6)
+
+    def test_bare_attn_pool_is_gone(self):
+        """The no-residual pool was removed, not kept as an option."""
+        from gr00t.model.gr00t_n1d7.gr00t_n1d7 import TipTargetHead
+
+        with pytest.raises(ValueError, match="tip_target_pool"):
+            TipTargetHead(
+                latent_dim=8,
+                hidden_dim=8,
+                cond_dim=8,
+                use_conditioning=False,
+                xyz_scale=0.1,
+                pool="attn",
+            )
+
+    def test_rejects_unknown_pool(self):
+        from gr00t.model.gr00t_n1d7.gr00t_n1d7 import TipTargetHead
+
+        with pytest.raises(ValueError, match="tip_target_pool"):
+            TipTargetHead(
+                latent_dim=8,
+                hidden_dim=8,
+                cond_dim=8,
+                use_conditioning=False,
+                xyz_scale=0.1,
+                pool="bogus",
+            )
+
+
+class TestTipTargetTeacherForcingSchedule:
+    """Scheduled sampling: hand the conditioning token over once the head is good."""
+
+    @staticmethod
+    def _head(**overrides):
+        defaults = dict(
+            use_tip_target_head=True,
+            tip_target_loss_weight=0.5,
+            tip_target_tf_gate_mm=10.0,
+            tip_target_tf_gate_patience=3,
+            tip_target_tf_ramp_steps=10,
+            tip_target_tf_gate_ema=0.0,  # EMA follows the input exactly, for determinism
+        )
+        defaults.update(overrides)
+        return Gr00tN1d7ActionHead(_small_config(**defaults))
+
+    def test_gate_stays_shut_above_the_threshold(self):
+        head = self._head()
+        for _ in range(20):
+            assert head._tip_target_pred_prob(torch.tensor(50.0)) == 0.0
+        assert head.tip_target_tf_open_step.item() == -1
+
+    def test_gate_needs_the_patience_window(self):
+        head = self._head()
+        assert head._tip_target_pred_prob(torch.tensor(1.0)) == 0.0  # 1 of 3
+        assert head._tip_target_pred_prob(torch.tensor(1.0)) == 0.0  # 2 of 3
+        head._tip_target_pred_prob(torch.tensor(1.0))  # 3 of 3 -> opens
+        assert head.tip_target_tf_open_step.item() == 3
+
+    def test_a_bad_step_resets_the_window(self):
+        head = self._head()
+        head._tip_target_pred_prob(torch.tensor(1.0))
+        head._tip_target_pred_prob(torch.tensor(1.0))
+        head._tip_target_pred_prob(torch.tensor(99.0))  # resets the hold counter
+        head._tip_target_pred_prob(torch.tensor(1.0))
+        head._tip_target_pred_prob(torch.tensor(1.0))
+        assert head.tip_target_tf_open_step.item() == -1
+
+    def test_probability_ramps_and_saturates(self):
+        head = self._head()
+        for _ in range(3):
+            head._tip_target_pred_prob(torch.tensor(1.0))
+        probs = [head._tip_target_pred_prob(torch.tensor(1.0)) for _ in range(12)]
+        assert probs[0] == pytest.approx(0.1)
+        assert probs == sorted(probs)
+        assert probs[-1] == pytest.approx(1.0)
+
+    def test_gate_is_sticky(self):
+        head = self._head()
+        for _ in range(3):
+            head._tip_target_pred_prob(torch.tensor(1.0))
+        opened = head.tip_target_tf_open_step.item()
+        for _ in range(5):
+            head._tip_target_pred_prob(torch.tensor(999.0))  # error blows up again
+        assert head.tip_target_tf_open_step.item() == opened
+        assert head._tip_target_pred_prob(torch.tensor(999.0)) > 0.0
+
+    def test_schedule_survives_a_checkpoint_round_trip(self):
+        """A time-limited Euler job must resume the schedule, not restart it."""
+        head = self._head()
+        for _ in range(6):
+            head._tip_target_pred_prob(torch.tensor(1.0))
+        state = {k: v.clone() for k, v in head.state_dict().items()}
+        assert "tip_target_tf_open_step" in state
+
+        resumed = self._head()
+        resumed.load_state_dict(state)
+        assert resumed.tip_target_tf_open_step.item() == head.tip_target_tf_open_step.item()
+        assert resumed.tip_target_tf_step.item() == head.tip_target_tf_step.item()
+
+    def test_disabled_by_default(self):
+        head = Gr00tN1d7ActionHead(
+            _small_config(use_tip_target_head=True, tip_target_loss_weight=0.5)
+        )
+        assert head.tip_target_tf_gate_mm is None
+        assert head._tip_target_pred_prob(torch.tensor(0.0)) == 0.0
+
+    def test_eval_reads_the_schedule_without_advancing_it(self):
+        head = self._head()
+        for _ in range(4):
+            head._tip_target_pred_prob(torch.tensor(1.0))
+        step = head.tip_target_tf_step.item()
+        assert head._tip_target_pred_prob_readonly() == pytest.approx(0.1)
+        assert head.tip_target_tf_step.item() == step

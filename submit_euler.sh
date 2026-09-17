@@ -111,6 +111,9 @@ echo "DATASET:   $DATASET_HOST_DIR  (-> /workspace/$DATASET_NAME)"
 echo "MODALITY:  $MODALITY_CONFIG"
 echo "RUN_NAME:  ${RUN_NAME:-red_and_green}"
 echo "TIP HEAD:  ${USE_TIP_TARGET_HEAD:-<default: true>}"
+echo "POOL:      ${TIP_TARGET_POOL:-<default: attn_residual>}  (attn_residual | mean)"
+echo "WRIST MASK:${TIP_TARGET_WRIST_MASK_PROB:-<default: 0 = off>}"
+echo "TF GATE:   ${TIP_TARGET_TF_GATE_MM:-<default: none, teacher-force throughout>}"
 echo "========================="
 
 # --- Create directories ---
@@ -157,6 +160,15 @@ time apptainer exec --nv \
     --env XDG_CACHE_HOME=/groot/cache \
     --env RUN_NAME="${RUN_NAME:-red_and_green}" \
     --env TIP_TARGET_POOL="${TIP_TARGET_POOL:-}" \
+    --env TIP_TARGET_LAT_LOSS_WEIGHT="${TIP_TARGET_LAT_LOSS_WEIGHT:-}" \
+    --env TIP_TARGET_DEPTH_LOSS_WEIGHT="${TIP_TARGET_DEPTH_LOSS_WEIGHT:-}" \
+    --env TIP_TARGET_ROT_LOSS_WEIGHT="${TIP_TARGET_ROT_LOSS_WEIGHT:-}" \
+    --env TIP_TARGET_WRIST_MASK_PROB="${TIP_TARGET_WRIST_MASK_PROB:-}" \
+    --env TIP_TARGET_TF_GATE_MM="${TIP_TARGET_TF_GATE_MM:-}" \
+    --env TIP_TARGET_TF_RAMP_STEPS="${TIP_TARGET_TF_RAMP_STEPS:-}" \
+    --env TIP_TARGET_TF_MAX_PRED_PROB="${TIP_TARGET_TF_MAX_PRED_PROB:-}" \
+    --env TIP_TARGET_TF_GATE_PATIENCE="${TIP_TARGET_TF_GATE_PATIENCE:-}" \
+    --env TIP_TARGET_TF_GATE_EMA="${TIP_TARGET_TF_GATE_EMA:-}" \
     --env NUM_EPOCHS="${NUM_EPOCHS:-}" \
     --env MAX_STEPS="${MAX_STEPS:-}" \
     --env SAVE_STEPS="${SAVE_STEPS:-}" \

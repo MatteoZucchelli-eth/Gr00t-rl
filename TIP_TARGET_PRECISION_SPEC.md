@@ -86,13 +86,43 @@ Sharpen the visible-case prediction; the current pooling throws away spatial loc
   frames the target.
 - Keep the 9d output shape and loss unchanged.
 - **Accept:** visible-frame `‖xyz_pred − xyz_gt‖` drops vs the mean-pool baseline on a fixed val set.
+- **Status:** the attention pool exists (`tip_target_pool=attn`) but keeps **losing to `mean`** in
+  practice. Two measured reasons it can, which point at different fixes:
+  - It is ~21.3M fresh randomly-initialized parameters against `mean`'s ~1.3M — 16.8M of that is
+    the `nn.MultiheadAttention` alone at `latent_dim=2048`. That is a lot of weight to learn from
+    scratch on a finetune budget, and the pool has no residual path, so training *starts* at
+    "a mean pool seen through an untrained 16.8M-parameter random projection".
+  - At `image_target_size=256` the target square spans **0.47 visual tokens** (42.2 native px,
+    measured over 49k fine-phase frames). No single token contains the target, so the
+    "attend to the right patch" advantage does not exist at all. It should appear above ~512px.
+  - `tip_target_pool=attn_residual` addresses the first: the attention's output projection is
+    zero-initialized and the masked-mean vector is added back, so the head **starts exactly at the
+    mean-pool solution** and the attention only ever learns a correction. It cannot start worse
+    than `mean`.
+  - The clean experiment is therefore 2x2: `{mean, attn_residual}` x `{256, 512}`. If
+    `attn_residual` beats `mean` at 256, the problem was optimization; if only at 512, it was
+    resolution. `attn` and `attn_residual` are mutually resumable; `mean` is not weight-compatible
+    with either, so give it its own `RUN_NAME`.
 
-### Task C — Decoupled position/rotation loss  [low risk]
-- Split the tip-target loss (`F.mse_loss` at ~L517) into separate **xyz** and **rot6d** terms with
-  independent weights. Position is the bottleneck; rotation is already accurate (~2.7–7°).
-- Use **Huber/SmoothL1** on xyz so small near-target residuals keep gradient; keep MSE on rot6d
-  (optionally Gram-Schmidt the predicted rot6d before the loss).
-- Expose `tip_target_pos_loss_weight` / `tip_target_rot_loss_weight` in config.
+### Task C — Decoupled position/rotation loss  [DONE, and taken further]
+- Position and rot6d are separate weighted terms, and the **position term is itself split into a
+  lateral and a depth part** — the two are not equally learnable, so one weight for "position"
+  was hiding the real asymmetry.
+- The split is taken in the **camera frame**, not the tip frame. Kabsch over 44.7k
+  (heatmap-sidecar `u`/`v`/`depth_z`, `next.tip_target_9d`) pairs — rigid, rms 1.18 mm, since the
+  wrist camera and the drill tip share a link — puts the optical axis at
+  `[0.9037, -0.0012, -0.4281]` in the tip frame. **Tip-frame `z` is not depth**: depth is
+  `0.9037*x - 0.4281*z`, so an x,y-vs-z split would leave 90% of the depth direction in the
+  "lateral" term. Camera-frame target stats over 44.7k visible frames: lateral X `+3.7 ± 38.9 mm`,
+  lateral Y `-2.0 ± 25.4 mm`, depth `148.0 ± 30.0 mm` (58–220 mm). 1 processed px = 0.381 mm of
+  lateral error at the median depth; depth has no such direct readout.
+- Config: `tip_target_lat_loss_weight` / `tip_target_depth_loss_weight` /
+  `tip_target_rot_loss_weight`, with the rotation stored in `tip_target_cam_axes`. The defaults
+  `2/3 + 1/3` reproduce the previous single xyz MSE **exactly** (a rotation preserves the L2
+  norm), so the split is inert until deliberately reweighted.
+- Logged in mm as `tip_target_lat_err_mm` / `tip_target_depth_err_mm` / `tip_target_pos_err_mm`.
+- Not done: Huber/SmoothL1 on the position term. Still worth trying on top.
+- The `rel_abs` objective has been **removed** (it was measured 5.7x worse).
 
 ### Task D — Config alignment & hygiene  [trivial]
 - Make the action horizon consistent across `register_new_modality.py` (`G1_PALM_EEF_CHUNK_SIZE`),
@@ -100,14 +130,40 @@ Sharpen the visible-case prediction; the current pooling throws away spatial loc
 - Reduce color jitter in `start_finetune.sh` (task is red/green-semantic): `hue 0.08 → ~0.02`,
   `saturation 0.5 → ~0.25`; keep brightness/contrast.
 
-### Task E — Exposure-bias mitigation  [optional, do with A/B]
-- The conditioning token is teacher-forced on ground-truth + 5 mm noise (~L446), but at inference it
-  receives the head's own (larger) error. Add **scheduled sampling** (ramp a probability of feeding
-  the detached head prediction instead of GT during training) and/or raise the conditioning noise
-  toward the real error scale. Combine with A/B, not instead of them.
+### Task E — Exposure-bias mitigation  [DONE]
+- Scheduled sampling is implemented and **off by default**. Set `tip_target_tf_gate_mm` (or
+  `TIP_TARGET_TF_GATE_MM` in `start_finetune.sh`) to the mean position error in millimetres the
+  head must reach before conditioning starts being handed over to its own prediction.
+- It is a gated ramp, not a switch: an EMA of `tip_target_pos_err_mm` must hold under the
+  threshold for `tip_target_tf_gate_patience` steps, the gate is sticky once open, and the
+  per-sample handover probability then ramps `0 -> tip_target_tf_max_pred_prob` over
+  `tip_target_tf_ramp_steps`.
+- Two things that would silently break it and are handled: the gate metric is **all-reduced**
+  across ranks (two GPUs disagreeing would feed different conditioning tokens for the same
+  optimizer step), and the schedule lives in **persistent buffers** so a time-limited Euler job
+  resumes it rather than restarting it.
+- Pick the threshold off a previous run's `tip_target_pos_err_mm` curve — a value the head
+  demonstrably reaches, not an aspiration. Too low and the gate never opens (harmless); too high
+  and the action head is handed a conditioning token that is still mostly noise.
+
+### Task F — Force the ego view into the head  [NEW, off by default]
+- `tip_target_wrist_mask_prob` hides the **wrist** image tokens from the tip-target head's pooling
+  on that fraction of training samples, so the head has to localize the target from the ego (head)
+  camera and can learn to fuse the two views instead of leaning entirely on the wrist.
+- It narrows the auxiliary head's key/value set only — the action head still sees every token, so
+  it cannot destabilize policy training.
+- It is meaningful rather than cosmetic: the backbone is causal and the views are concatenated
+  **ego-first**, so ego token representations can never have attended to wrist tokens.
+- **Check before trusting a result:** nothing supervises the ego view (the `heatmap_labels/`
+  sidecar is wrist-only), the ego camera is natively 480px against the wrist's 720, and
+  `image_target_size` is one global value — so above 480 the ego view is being upsampled. Confirm
+  the target is resolvable in ego at all first.
+- Note the interaction with Task B: `pool="mean"` cannot really fuse two views (it just averages),
+  so this argues for one of the attention pools.
 
 ## 4. Order & notes
-- Implement **A → B → C → D**, then E. A and B need a retrain to show effect; C/D ride along.
+- C, E and F are implemented and land inert (defaults reproduce the previous behaviour exactly).
+  A, B and D remain. B still needs a retrain to show effect; C/D ride along.
 - A's code should land **before** P1 so the data regeneration "just works."
 
 ## 5. Do NOT

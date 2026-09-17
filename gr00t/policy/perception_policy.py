@@ -99,7 +99,9 @@ class PerceptionPolicy(BasePolicy):
                 f"is not in this checkpoint. Available: {sorted(all_modality_configs.keys())}"
             )
         self.modality_configs = {
-            k: v for k, v in all_modality_configs[self.embodiment_tag.value].items() if k != "rl_info"
+            k: v
+            for k, v in all_modality_configs[self.embodiment_tag.value].items()
+            if k != "rl_info"
         }
         self.collate_fn = self.processor.collator
 

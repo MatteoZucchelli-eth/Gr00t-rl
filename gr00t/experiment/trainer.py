@@ -376,9 +376,15 @@ class Gr00tTrainer(Trainer):
                 aux_logs["tip_target_loss"] = float(tip_target_loss.detach().item())
             for key in (
                 "tip_target_pos_loss",
-                "tip_target_pos_rel_loss",
-                "tip_target_pos_abs_loss",
+                "tip_target_lat_loss",
+                "tip_target_depth_loss",
                 "tip_target_rot_loss",
+                # Millimetre companions to the scaled-space squares above, plus the
+                # scheduled-sampling probability so the handover is visible in wandb.
+                "tip_target_lat_err_mm",
+                "tip_target_depth_err_mm",
+                "tip_target_pos_err_mm",
+                "tip_target_cond_pred_prob",
             ):
                 value = outputs.get(key)
                 if value is not None:

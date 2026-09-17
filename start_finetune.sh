@@ -44,39 +44,111 @@ USE_TIP_TARGET_HEAD="${USE_TIP_TARGET_HEAD:-true}"
 TIP_TARGET_LOSS_WEIGHT=0.5       # overall tip-target loss multiplier vs the action loss
 TIP_TARGET_XYZ_SCALE=0.1         # metres; scales xyz inside the head's prediction space
 
-# Objective: "mse" = one plain MSE over the scaled 9d (the original loss, and the
-# only one measured to work). "rel_abs" = the distance-normalized position term
-# plus an absolute anchor -- measured 5.7x worse in position error because
-# dividing by distance makes far-range error nearly free and the model shrinks
-# its predicted range toward the near-field mean. Do not use rel_abs without a
-# reason; the four weights below are inert under "mse".
-TIP_TARGET_LOSS_TYPE=mse
-TIP_TARGET_POS_LOSS_WEIGHT=1.0   # rel_abs only: combined xyz term
-TIP_TARGET_POS_ABS_WEIGHT=0.2    # rel_abs only: absolute MSE anchor
-TIP_TARGET_ROT_LOSS_WEIGHT=1.0   # rel_abs only: rot6d MSE term
-TIP_TARGET_DIST_FLOOR=0.05       # rel_abs only: metres, clamp for the normalization
+# Position loss split. The position error is rotated into the CAMERA frame and split
+# into a LATERAL part (perpendicular to the optical axis) and a DEPTH part (along it),
+# because the two are not equally learnable: 1 processed px is 0.381 mm of lateral
+# error at the median 148 mm working depth, whereas depth has to be inferred from
+# apparent size (the target sits at 148 +/- 31 mm, spanning 53-225 mm).
+#
+# The rotation matters. Kabsch over 44.7k (heatmap-sidecar u/v/depth_z,
+# next.tip_target_9d) pairs -- rigid, rms 1.18 mm, since the wrist camera and the drill
+# tip share a link -- puts the optical axis at [0.9037, -0.0012, -0.4281] in the TIP
+# frame. So tip-frame z is NOT depth: depth = 0.9037*x - 0.4281*z. Splitting the
+# label's own x,y vs z would leave 90% of the depth direction in the "lateral" term.
+#
+# 2/3 + 1/3 is NOT arbitrary: a rotation preserves the L2 norm, so those weights
+# reproduce the previous single xyz MSE exactly. The split is inert until you change
+# them -- which makes any reweighting a clean one-variable experiment. Raise DEPTH to
+# spend more capacity on the hard direction; lower it to stop an under-determined
+# depth signal from polluting the lateral estimate.
+TIP_TARGET_LAT_LOSS_WEIGHT="${TIP_TARGET_LAT_LOSS_WEIGHT:-0.6666666666666666}"
+TIP_TARGET_DEPTH_LOSS_WEIGHT="${TIP_TARGET_DEPTH_LOSS_WEIGHT:-0.3333333333333333}"
+TIP_TARGET_ROT_LOSS_WEIGHT="${TIP_TARGET_ROT_LOSS_WEIGHT:-1.0}"   # rot6d MSE vs the position term
 
-# How the VL token sequence is pooled into the vector fed to the head's predictor
-# MLP: "attn" (num_queries learned queries cross-attending over all vision +
-# language tokens) or "mean" (masked mean). This is the ONLY thing that should
-# differ between the two arms of the pooling ablation. The two are not
-# weight-compatible, so give each arm its own RUN_NAME.
-TIP_TARGET_POOL="${TIP_TARGET_POOL:-attn}"
-TIP_TARGET_NUM_QUERIES=4         # attn only
-TIP_TARGET_ATTN_HEADS=8          # attn only
+# Probability of hiding the WRIST image tokens from the tip-target head's pooling on a
+# training sample, forcing it to localize the target from the ego (head) camera and so
+# to learn to use both views rather than leaning entirely on the wrist. This narrows
+# the AUXILIARY HEAD's view only -- the action head still sees every token, so it
+# cannot destabilize policy training. It is meaningful rather than cosmetic because the
+# backbone is causal and the views are concatenated ego-first, so ego token
+# representations can never have attended to wrist tokens.
+#
+# 0 (default) disables it. Before trusting a result here, check that the target is
+# resolvable in ego at all: nothing supervises the ego view (the heatmap_labels/
+# sidecar is wrist-only), the ego camera is natively 480px against the wrist's 720,
+# and IMAGE_TARGET_SIZE is one global value, so above 480 ego is being upsampled.
+TIP_TARGET_WRIST_MASK_PROB="${TIP_TARGET_WRIST_MASK_PROB:-0}"
+
+# Scheduled sampling of the conditioning token. Training teacher-forces the token on
+# the LABEL, but at deployment the action head only ever sees the head's own
+# prediction. Set TIP_TARGET_TF_GATE_MM to the mean position error (MILLIMETRES) the
+# head must reach before conditioning starts being handed over to that prediction.
+# Empty (default) = teacher-force for the whole run, the previous behaviour.
+#
+# The gate watches an EMA of the position error, needs it to hold under the threshold
+# for TIP_TARGET_TF_GATE_PATIENCE steps, and is sticky -- it never re-closes. Crossing
+# it ramps the per-sample handover probability 0 -> TIP_TARGET_TF_MAX_PRED_PROB over
+# TIP_TARGET_TF_RAMP_STEPS rather than switching in one step. The decision is
+# all-reduced across the 2 GPUs (ranks that disagreed would feed different conditioning
+# tokens for the same optimizer step) and lives in the checkpoint, so resubmitting this
+# job resumes the schedule instead of restarting it.
+#
+# Pick the threshold off a previous run's tip_target_pos_err_mm curve: it should be a
+# value the head demonstrably reaches, not an aspiration. Too low and the gate never
+# opens (harmless, identical to the old behaviour); too high and you hand the action
+# head a conditioning token that is still mostly noise.
+TIP_TARGET_TF_GATE_MM="${TIP_TARGET_TF_GATE_MM:-}"
+TIP_TARGET_TF_RAMP_STEPS="${TIP_TARGET_TF_RAMP_STEPS:-2000}"
+TIP_TARGET_TF_MAX_PRED_PROB="${TIP_TARGET_TF_MAX_PRED_PROB:-1.0}"
+TIP_TARGET_TF_GATE_PATIENCE="${TIP_TARGET_TF_GATE_PATIENCE:-200}"
+TIP_TARGET_TF_GATE_EMA="${TIP_TARGET_TF_GATE_EMA:-0.99}"
+
+# How the VL token sequence is pooled into the vector fed to the head's predictor MLP:
+#   attn_residual  num_queries learned queries cross-attending over all vision+language
+#                  tokens, PLUS the masked-mean vector added back to every pooled query,
+#                  with the attention's output projection zero-initialized (default)
+#   mean           plain masked mean over all valid tokens
+#
+# The bare no-residual "attn" pool was REMOVED. Without the residual the pool is a
+# single cross-attention layer with no skip and no FFN whose queries start random, so
+# the softmax begins near-uniform and training starts at "a mean pool through an
+# untrained 16.8M-parameter random projection" -- and the gradient reaching the backbone
+# is routed by whatever those random queries happened to attend to. With the residual
+# the head starts AT the mean-pool solution and the attention only learns a correction.
+# An old bare-attn checkpoint still loads (same shapes) but will NOT reproduce.
+#
+# NOTE what the measured evidence actually says, before assuming mean is the safe pick.
+# At 256px, paired evals in scratchpad/ have attn AHEAD on mean error:
+#   head_to_head.csv        (480 samples)  attn 5.60 mm / med 3.51   mean 6.53 / 3.47
+#   tip_eval_512_vs_256.csv (500 @256px)   attn 9.89 mm / med 4.82   mean 10.85 / 5.03
+# mean only wins in the 512px rows of that second file, which are CONFOUNDED (12,662
+# steps against 25,323 -- half the samples). attn_residual should dominate both.
+#
+# mean is not weight-compatible with attn_residual (different predictor input width), so
+# give it its own RUN_NAME.
+TIP_TARGET_POOL="${TIP_TARGET_POOL:-attn_residual}"
+TIP_TARGET_NUM_QUERIES="${TIP_TARGET_NUM_QUERIES:-4}"   # attn_residual only
+TIP_TARGET_ATTN_HEADS="${TIP_TARGET_ATTN_HEADS:-8}"     # attn_residual only
+
+TIP_TARGET_TF_ARGS=""
+[ -n "$TIP_TARGET_TF_GATE_MM" ] && TIP_TARGET_TF_ARGS="--tip-target-tf-gate-mm ${TIP_TARGET_TF_GATE_MM} \
+    --tip-target-tf-ramp-steps ${TIP_TARGET_TF_RAMP_STEPS} \
+    --tip-target-tf-max-pred-prob ${TIP_TARGET_TF_MAX_PRED_PROB} \
+    --tip-target-tf-gate-patience ${TIP_TARGET_TF_GATE_PATIENCE} \
+    --tip-target-tf-gate-ema ${TIP_TARGET_TF_GATE_EMA}"
 
 TIP_TARGET_ARGS=""
 [ "$USE_TIP_TARGET_HEAD" = true ] && TIP_TARGET_ARGS="--use-tip-target-head \
     --tip-target-loss-weight ${TIP_TARGET_LOSS_WEIGHT} \
-    --tip-target-loss-type ${TIP_TARGET_LOSS_TYPE} \
     --tip-target-pool ${TIP_TARGET_POOL} \
     --tip-target-num-queries ${TIP_TARGET_NUM_QUERIES} \
     --tip-target-attn-heads ${TIP_TARGET_ATTN_HEADS} \
-    --tip-target-pos-loss-weight ${TIP_TARGET_POS_LOSS_WEIGHT} \
-    --tip-target-pos-abs-weight ${TIP_TARGET_POS_ABS_WEIGHT} \
+    --tip-target-lat-loss-weight ${TIP_TARGET_LAT_LOSS_WEIGHT} \
+    --tip-target-depth-loss-weight ${TIP_TARGET_DEPTH_LOSS_WEIGHT} \
     --tip-target-rot-loss-weight ${TIP_TARGET_ROT_LOSS_WEIGHT} \
-    --tip-target-dist-floor ${TIP_TARGET_DIST_FLOOR} \
-    --tip-target-xyz-scale ${TIP_TARGET_XYZ_SCALE}"
+    --tip-target-wrist-mask-prob ${TIP_TARGET_WRIST_MASK_PROB} \
+    --tip-target-xyz-scale ${TIP_TARGET_XYZ_SCALE} \
+    ${TIP_TARGET_TF_ARGS}"
 
 # Image resolution. These flags used to be INERT -- from_pretrained's override
 # allowlist dropped image_target_size/image_crop_size/shortest_image_edge/
@@ -161,6 +233,15 @@ echo "[train] USE_TIP_TARGET_HEAD=${USE_TIP_TARGET_HEAD} (false = vanilla GR00T 
 echo "[train] OUTPUT_DIR=${OUTPUT_DIR}"
 echo "[train] MASTER_PORT=${MASTER_PORT}"
 echo "[train] TIP_TARGET_ARGS=${TIP_TARGET_ARGS:-<none>}"
+echo "[train] TIP_TARGET_POOL=${TIP_TARGET_POOL}  WRIST_MASK_PROB=${TIP_TARGET_WRIST_MASK_PROB}"
+echo "[train] TIP_TARGET_LAT/DEPTH/ROT weights = ${TIP_TARGET_LAT_LOSS_WEIGHT} / ${TIP_TARGET_DEPTH_LOSS_WEIGHT} / ${TIP_TARGET_ROT_LOSS_WEIGHT}"
+if [ -n "$TIP_TARGET_TF_GATE_MM" ]; then
+    echo "[train] TEACHER FORCING: hand over to the head's own prediction once the EMA'd"
+    echo "[train]   position error holds below ${TIP_TARGET_TF_GATE_MM} mm for ${TIP_TARGET_TF_GATE_PATIENCE} steps,"
+    echo "[train]   then ramp to p=${TIP_TARGET_TF_MAX_PRED_PROB} over ${TIP_TARGET_TF_RAMP_STEPS} steps"
+else
+    echo "[train] TEACHER FORCING: always on (no gate) — set TIP_TARGET_TF_GATE_MM to hand over"
+fi
 echo "[train] GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE} GRAD_ACCUM_STEPS=${GRAD_ACCUM_STEPS} (effective $((GLOBAL_BATCH_SIZE*GRAD_ACCUM_STEPS)))"
 echo "[train] IMAGE_TARGET_SIZE=${IMAGE_TARGET_SIZE} IMAGE_CROP_SIZE=${IMAGE_CROP_SIZE}"
 echo "[train]   -> requested crop fraction $(python -c "print(f'{${IMAGE_CROP_SIZE}/${IMAGE_TARGET_SIZE}:.3f}')"), ~$(python -c "print((${IMAGE_TARGET_SIZE}//32)**2)") visual tokens/image"

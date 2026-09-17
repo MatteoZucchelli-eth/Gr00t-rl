@@ -17,11 +17,6 @@
 from dataclasses import dataclass
 
 
-GR00T_BASE_MODEL = "nvidia/GR00T-N1.7-3B"
-"""The one checkpoint the perception-action model ever starts from. Its architecture is
-pinned in Gr00tN1d7PerceptionActionConfig, so this is not a user choice."""
-
-
 @dataclass
 class FinetuneConfig:
     """
@@ -73,55 +68,141 @@ class FinetuneConfig:
     """Overall multiplier on the tip-target loss (pos + rot terms) when added to the action loss
     (only used if use_tip_target_head)."""
 
-    tip_target_loss_type: str = "mse"
-    """Tip-target objective. "mse" (default): the per-part MSEs of xyz and rot6d averaged
-    50/50. Originally a single MSE over the whole scaled 9d vector, which gave rot6d 2x the
-    weight of xyz simply by occupying 6 of the 9 averaged dims; the 50/50 split removes that.
-    The comparison below was measured against that original 9d form. "rel_abs": position error
-    normalized by the distance to target plus an absolute anchor. rel_abs is MEASURED WORSE
-    (5.7x worse mean position error in-distribution, predicted-distance regression slope 0.82
-    vs 1.02, -98 mm bias beyond 30 cm): dividing by distance makes far-range error nearly free
-    so the model shrinks its range toward the near-field mean, and below tip_target_dist_floor
-    the relative term is just absolute error times a constant, so it buys nothing up close
-    either. Kept only so the comparison stays reproducible."""
+    tip_target_lat_loss_weight: float = 2.0 / 3.0
+    """Weight of the LATERAL position term -- the two components of the position error
+    perpendicular to the wrist camera's optical axis, i.e. the directions that show up
+    directly as pixel displacement.
 
-    tip_target_pos_loss_weight: float = 1.0
-    """Weight of the position term. Applies to tip_target_loss_type="rel_abs" ONLY; inert
-    under "mse"."""
+    The position error is rotated out of the tip frame into the CAMERA frame before it is
+    split, because the label's own axes do not line up with the observable ones. Measured
+    by Kabsch on 44.7k (sidecar u/v/depth_z, next.tip_target_9d) pairs, rigid fit rms
+    1.18 mm (the wrist camera and the drill tip share a link, so the transform is a
+    constant): the optical axis in the tip frame is [0.9037, -0.0012, -0.4281]. Tip-frame
+    `z` is therefore NOT depth -- depth is 0.9037*x - 0.4281*z, and a naive x,y-vs-z split
+    leaves 90% of the depth direction inside the "lateral" term.
 
-    tip_target_pos_abs_weight: float = 0.2
-    """Weight of the absolute (scaled-space MSE) anchor inside the position term. Applies to
-    tip_target_loss_type="rel_abs" ONLY; inert under "mse"."""
+    Lateral error is cheap to observe: 1 processed px is 0.381 mm at the median working
+    depth of 148 mm. See tip_target_depth_loss_weight for the other half.
+
+    NOTE the defaults 2/3 and 1/3 reproduce the previous single xyz MSE EXACTLY -- a
+    rotation preserves the L2 norm, so an equally-weighted split is the same number. Change
+    them only as a deliberate experiment, one at a time."""
+
+    tip_target_depth_loss_weight: float = 1.0 / 3.0
+    """Weight of the DEPTH position term -- the component of the position error along the
+    wrist camera's optical axis. This is the hard direction: it cannot be read off pixel
+    positions and has to be inferred from apparent size and perspective. Measured over the
+    heatmap sidecar (44.7k visible frames), the target sits at 148.0 +/- 30.0 mm of camera
+    depth, spanning 53-225 mm.
+
+    Raise it to spend more capacity on depth; lower it to stop an under-determined depth
+    signal from polluting the lateral estimate. See tip_target_lat_loss_weight for the
+    default that reproduces the old loss."""
 
     tip_target_rot_loss_weight: float = 1.0
-    """Weight of the rotation term (plain MSE on the raw rot6d part). Applies to
-    tip_target_loss_type="rel_abs" ONLY; inert under "mse", which weights rot6d and xyz
-    equally at 0.5 each."""
+    """Weight of the rotation term (plain MSE on the raw rot6d part) relative to the
+    combined position term. 1.0 weights position and rotation equally, which is what the
+    previous "mse" objective did."""
 
-    tip_target_dist_floor: float = 0.05
-    """Distance floor (metres) for the position-loss normalization. Applies to
-    tip_target_loss_type="rel_abs" ONLY; inert under "mse"."""
+    tip_target_wrist_mask_prob: float = 0.0
+    """Probability of hiding the WRIST image tokens from the tip-target head's pooling on a
+    given training sample, so the head has to recover the target from the ego (head) camera
+    alone and can learn to fuse the two views rather than leaning entirely on the wrist.
 
-    tip_target_pool: str = "attn"
-    """How the variable-length vision-language token sequence is collapsed into the single
-    vector fed to the head's predictor MLP. "attn" (default): `tip_target_num_queries` learned
-    query tokens cross-attend over the whole sequence, so the head can focus on the patches
-    containing the target and on the text tokens that name it. "mean": masked mean over all
-    tokens. These give the predictor different input widths (num_queries*latent_dim vs
-    latent_dim), so the two are NOT weight-compatible -- a checkpoint trained with one cannot
-    be resumed with the other."""
+    This masks the head's key/value set only -- the action head still sees every token, so
+    it cannot destabilize policy training. The masking is meaningful rather than cosmetic
+    because the backbone is causal and the views are concatenated ego-first (both
+    register_new_modality.py and register_autocollect_modality.py list
+    ["ego_view", "wrist_view"]), so ego tokens can never attend to wrist tokens: their
+    representations are genuinely wrist-free. The split is read off the image-token run
+    structure, so it is correct for single-frame [0] and for [-1, 0] alike.
+
+    0.0 (default) disables it. Applied in training only; inference always sees both views.
+
+    CAVEAT before trusting a result: nothing supervises the ego view directly (the
+    heatmap_labels/ sidecar is wrist-only), the ego camera is natively 480px against the
+    wrist's 720, and image_target_size is a single global value, so above 480 the ego view
+    is being upsampled. Check that the target is resolvable in ego at all first."""
+
+    tip_target_pool: str = "attn_residual"
+    """How the vision-language token sequence is collapsed into the vector fed to the head's
+    predictor MLP.
+
+      "attn_residual" (default)  `tip_target_num_queries` learned query tokens cross-attend
+                                 over the whole sequence, so the head can focus on the patches
+                                 containing the target and on the text tokens that name it --
+                                 PLUS the masked-mean vector added back to every pooled query,
+                                 with the attention's output projection zero-initialized.
+      "mean"                     plain masked mean over all valid tokens.
+
+    The residual matters for exactly the reason you would expect. Without it the pool is a
+    single cross-attention layer with no skip connection and no FFN whose queries start as
+    random vectors, so the softmax begins near-uniform over the whole sequence: training
+    starts at "a mean pool seen through an untrained 16.8M-parameter random projection" (at
+    latent_dim 2048, against ~1.3M total for "mean") and has to climb out, while the gradient
+    reaching the backbone is routed by whatever those random queries happened to attend to.
+    With the residual the head starts AT the mean-pool solution, the mean path carries
+    gradient to every token from step 0, and the attention only learns a correction. Same
+    function class, better conditioned -- which is why the bare "attn" variant was removed
+    rather than kept as an option.
+
+    A checkpoint trained with the old bare "attn" still LOADS (identical parameter shapes) but
+    will NOT reproduce, because the mean vector is now added in the forward pass.
+
+    "mean" is not weight-compatible with "attn_residual" (predictor input width
+    `num_queries * latent_dim` vs `latent_dim`), so give it its own run name."""
 
     tip_target_num_queries: int = 4
-    """Number of learned query tokens for tip_target_pool="attn" (inert under "mean")."""
+    """Number of learned query tokens for tip_target_pool="attn_residual" (inert under
+    "mean")."""
 
     tip_target_attn_heads: int = 8
-    """Attention heads of the pooling cross-attention for tip_target_pool="attn" (inert under
-    "mean")."""
+    """Attention heads of the pooling cross-attention for tip_target_pool="attn_residual"
+    (inert under "mean")."""
 
     use_tip_target_conditioning: bool = True
     """If True, feed the tip-target 9d back as a conditioning token to the action head.
     Teacher-forced: training conditions on the ground truth (+ small noise), inference on the
-    head's prediction."""
+    head's prediction. See tip_target_tf_gate_mm to hand that over to the head's own
+    prediction once it is good enough."""
+
+    tip_target_tf_gate_mm: float | None = None
+    """Scheduled sampling: once the head is accurate enough, start conditioning the action
+    head on its OWN prediction instead of the label, so the action head stops training
+    against a conditioning token it will never see at deployment.
+
+    Set it to the mean position error (MILLIMETRES) the head must reach before the handover
+    begins. None (default) keeps teacher forcing on for the whole run, the previous
+    behaviour.
+
+    The gate watches an EMA of the head's position error, requires it to hold under the
+    threshold for `tip_target_tf_gate_patience` steps, and is STICKY -- once open it never
+    closes, so a noisy batch cannot flip the conditioning distribution back and forth.
+    Crossing it does not switch anything abruptly: the per-sample probability of using the
+    prediction ramps 0 -> tip_target_tf_max_pred_prob over tip_target_tf_ramp_steps.
+
+    The decision is all-reduced across ranks (it must be: if two GPUs disagreed about whether
+    the gate is open they would feed different conditioning tokens and their gradients would
+    diverge) and is saved in the checkpoint, so resubmitting on Euler resumes the schedule
+    instead of restarting it."""
+
+    tip_target_tf_ramp_steps: int = 2000
+    """Steps over which the probability of conditioning on the prediction ramps from 0 to
+    tip_target_tf_max_pred_prob after the gate opens. Inert when tip_target_tf_gate_mm is
+    None."""
+
+    tip_target_tf_max_pred_prob: float = 1.0
+    """Probability of conditioning on the head's own prediction once the ramp completes. 1.0
+    hands over entirely; values below 1.0 keep a fraction of teacher-forced samples as a
+    stabilizer. Inert when tip_target_tf_gate_mm is None."""
+
+    tip_target_tf_gate_patience: int = 200
+    """Consecutive steps the EMA'd position error must stay under tip_target_tf_gate_mm
+    before the gate opens. Inert when tip_target_tf_gate_mm is None."""
+
+    tip_target_tf_gate_ema: float = 0.99
+    """Decay of the EMA over the head's position error that the gate watches. Inert when
+    tip_target_tf_gate_mm is None."""
 
     tip_target_xyz_scale: float = 0.1
     """Scale (metres) dividing the xyz part of the tip-target label inside the head so position and
@@ -260,10 +341,8 @@ class FinetuneConfig:
 
 @dataclass
 class _PerceptionCommonConfig:
-    """Settings shared by the perception-only and perception-conditioned-action
-    finetunes. Split out so the action variant can omit `base_model_path`: that model
-    always starts from GR00T_BASE_MODEL and exposing a choice there would let a
-    mismatched architecture load silently."""
+    """Settings of the perception-only finetune, kept in a base class so
+    `base_model_path` can be declared last (dataclass field ordering)."""
 
     dataset_path: str = "./g1_dataset"
     """Path to the dataset root (must contain the heatmap_labels/ sidecar directory)."""
@@ -385,119 +464,3 @@ class PerceptionFinetuneConfig(_PerceptionCommonConfig):
     (e.g. one of your finetuned GR00T runs — action-head weights are ignored) or a
     previous perception checkpoint. If None, starts from the raw Cosmos-Reason2-2B
     backbone weights."""
-
-
-@dataclass
-class PerceptionActionFinetuneConfig(_PerceptionCommonConfig):
-    """Configuration for the perception-CONDITIONED action model (fine approach).
-
-    Same wrist-only inputs and heatmap supervision as PerceptionFinetuneConfig, plus
-    the flow-matching action head. The perception output is cast into conditioning
-    tokens the DiT attends to, so the action chunk depends on where the target is
-    (see Gr00tN1d7PerceptionActionConfig for the token layout).
-    """
-
-    # --- Weight initialization (see Gr00tN1d7PerceptionActionPipeline) ---
-    # The base is ALWAYS nvidia/GR00T-N1.7-3B — there is no flag for it. The model
-    # config is pinned to that checkpoint's architecture (32 DiT blocks, 4 VL
-    # self-attention layers, 16 LLM layers), so any other base would load partially
-    # and silently. GR00T_BASE_MODEL below is the single source of truth.
-
-    perception_model_path: str | None = None
-    """OPTIONAL perception checkpoint overlaid on top of the GR00T base. Supplies the
-    trained perception head AND the backbone it was trained against, which overrides the
-    base backbone — the head's features are only meaningful on that backbone.
-
-    Not free: the existing perceptionv1 checkpoint was trained at select_layer=12, so
-    using it forces --select-layer 12 and gives up the foundation's top 4 LLM layers plus
-    the match between GR00T's pretrained action stack and the features it now sees. Left
-    unset, the perception head trains from scratch on a fully coherent GR00T init — which
-    teacher forcing makes safe, since the conditioning token comes from the LABEL during
-    training and only inference quality depends on the head."""
-
-    select_layer: int = 16
-    """LLM layers kept in the backbone. 16 = the foundation's own value. Set to 12 only to
-    match a perceptionv1-style overlay (the pipeline hard-fails on a mismatch)."""
-
-    # --- Action head ---
-    tune_projector: bool = True
-    """If True, fine-tune the state/action encoders and decoder."""
-
-    tune_diffusion_model: bool = True
-    """If True, fine-tune the DiT."""
-
-    state_dropout_prob: float = 0.2
-    """Dropout applied to state inputs in the processor, for regularization."""
-
-    # --- Perception loss vs action loss ---
-    perception_loss_weight: float = 1.0
-    """Multiplier on the whole perception loss when added to the action loss. Keep it at
-    1.0 unless the perception metrics degrade once the action loss is in play; 0 trains
-    the action head against a frozen-quality perception signal."""
-
-    # --- Conditioning tokens ---
-    use_perception_conditioning: bool = True
-    """Master switch for the conditioning tokens. If False the perception head is still
-    trained as an auxiliary task but the action head cannot see it (useful as the ablation
-    baseline that shows the conditioning is what helps)."""
-
-    use_perception_geometry_token: bool = True
-    """Emit the "where" token (Fourier-encoded uv + visibility + confidence + depth/normal)."""
-
-    use_perception_appearance_token: bool = True
-    """Emit the "what" token (heatmap-weighted pooled image feature)."""
-
-    perception_num_fourier_bands: int = 8
-    """Octaves in the (u, v) positional encoding. 8 resolves ~1 px at 720; raising it
-    costs nothing but can make the token noisier."""
-
-    perception_appearance_temperature: float = 1.0
-    """Softmax temperature of the heatmap used to pool the appearance token."""
-
-    perception_appearance_stopgrad: bool = False
-    """Cut the gradient from the action loss into the heatmap (through the appearance
-    token). Turn on only if uv_err_px_metric degrades once actions are trained."""
-
-    # --- Teacher forcing / exposure bias ---
-    perception_cond_teacher_forcing: bool = True
-    """Condition on the label (+ noise below) where one exists, on the head's own
-    prediction elsewhere. Matches the tip-target scheme."""
-
-    perception_cond_noise_uv_px: float = 3.0
-    """Std (processed-image px) of the noise added to the teacher-forced (u, v).
-
-    Measured via `scripts/calibrate_perception_conditioning.py` on the
-    1500_perception_planner eval: 0.85 processed px rms for a single frame, inflated 3x
-    because that eval only runs perception with a PARKED camera out to 67 mm while this
-    model runs it every frame, moving, out to 150 mm. RE-RUN the script for every new
-    perception checkpoint. Noise smaller than the real deployment error teaches the
-    policy to trust perfect perception and it will be brittle on the robot. 1 processed
-    px is 0.28-0.46 mm at the working depth (f = 388 px at the raw 720 camera, recovered
-    from the dataset)."""
-
-    perception_cond_noise_depth_m: float = 0.004
-    """Std (metres) of the RANDOM part of the depth error (measured single-frame spread
-    4.32 mm). The systematic part is perception_cond_bias_depth_m."""
-
-    perception_cond_bias_depth_m: float = 0.0
-    """Systematic depth offset (metres) added to the teacher-forced depth. 0 by default
-    because the default run trains a fresh perception head whose bias is unknown, and a
-    wrong bias is worse than none — it teaches the policy to compensate for an offset that
-    is not there. Set to 0.0065 when overlaying checkpoints-perceptionv1 (its measured
-    +6.49 mm, 84% of its mean-square depth error). Applied in eval mode too."""
-
-    perception_cond_noise_normal: float = 0.04
-    """Std of the noise on the teacher-forced wall normal. From the same eval's rotation
-    spread (3.49 deg -> 0.043 per component); the least reliable of the four."""
-
-    perception_cond_vis_dropout_prob: float = 0.1
-    """Probability of telling the policy "target not visible" even when the label says it
-    is, so it learns to hold/search instead of collapsing when perception drops out."""
-
-    # --- Overrides of the perception defaults ---
-    action_horizon: int = 30
-    """Number of future steps predicted per chunk. MUST equal the length of the action
-    delta_indices in the modality config (see register_perception_action_modality.py)."""
-
-    output_dir: str = "./outputs-perception-action"
-    wandb_project: str = "finetune-gr00t-n1d7-perception-action"

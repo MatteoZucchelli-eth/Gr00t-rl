@@ -235,16 +235,20 @@ if __name__ == "__main__":
     # Optional tip-target head.
     config.model.use_tip_target_head = ft_config.use_tip_target_head
     config.model.tip_target_loss_weight = ft_config.tip_target_loss_weight
-    config.model.tip_target_loss_type = ft_config.tip_target_loss_type
     config.model.tip_target_pool = ft_config.tip_target_pool
     config.model.tip_target_num_queries = ft_config.tip_target_num_queries
     config.model.tip_target_attn_heads = ft_config.tip_target_attn_heads
-    config.model.tip_target_pos_loss_weight = ft_config.tip_target_pos_loss_weight
-    config.model.tip_target_pos_abs_weight = ft_config.tip_target_pos_abs_weight
+    config.model.tip_target_lat_loss_weight = ft_config.tip_target_lat_loss_weight
+    config.model.tip_target_depth_loss_weight = ft_config.tip_target_depth_loss_weight
     config.model.tip_target_rot_loss_weight = ft_config.tip_target_rot_loss_weight
-    config.model.tip_target_dist_floor = ft_config.tip_target_dist_floor
+    config.model.tip_target_wrist_mask_prob = ft_config.tip_target_wrist_mask_prob
     config.model.use_tip_target_conditioning = ft_config.use_tip_target_conditioning
     config.model.tip_target_xyz_scale = ft_config.tip_target_xyz_scale
+    config.model.tip_target_tf_gate_mm = ft_config.tip_target_tf_gate_mm
+    config.model.tip_target_tf_ramp_steps = ft_config.tip_target_tf_ramp_steps
+    config.model.tip_target_tf_max_pred_prob = ft_config.tip_target_tf_max_pred_prob
+    config.model.tip_target_tf_gate_patience = ft_config.tip_target_tf_gate_patience
+    config.model.tip_target_tf_gate_ema = ft_config.tip_target_tf_gate_ema
 
     config.training.experiment_name = ft_config.experiment_name
     config.training.start_from_checkpoint = ft_config.base_model_path
