@@ -57,30 +57,37 @@ python gr00t/experiment/launch_finetune_perception.py \
     --image-target-size 720 --image-crop-size 648
 ```
 
-### Backbone init / "from scratch"
+### Backbone init
 
-The 2B VLM backbone (Cosmos-Reason2-2B) is **always** loaded from the published
-foundation weights — it is never randomly initialised. `--base-model-path` only
-controls what, if anything, is overlaid on top of it, and the perception head is
-**always fresh**. Three modes:
+The 2B VLM backbone (Cosmos-Reason2-2B) is **always** loaded from published weights —
+it is never randomly initialised. `--base-model-path` only controls which GR00T-lineage
+weights are overlaid on top of that architecture, and the perception head is **always
+fresh**. Two modes:
 
 | `--base-model-path` (or `BASE_MODEL_PATH=`) | Backbone | Use when |
 |---|---|---|
-| a finetuned VLA run of yours | that run's backbone (drilling-adapted) | reuse vision features already tuned on the task |
 | `nvidia/GR00T-N1.7-3B` (default) | GR00T foundation backbone | standard start |
-| omit the flag / `scratch` / `none` / `""` | raw Cosmos-Reason2-2B | **fresh run — inherit nothing from earlier drilling runs** |
+| a finetuned VLA run, or a previous perception checkpoint | that run's backbone | reuse vision features already tuned on the task |
 
-So to "finetune GR00T from scratch again" (nothing carried over from your previous
-runs), just start a fresh `RUN_NAME` and set `BASE_MODEL_PATH=scratch`:
+**The bare-Cosmos option is gone.** `scratch` / `none` / `""` used to skip the overlay
+entirely, and that was never "training from scratch": the architecture is Cosmos-Reason2-2B
+either way, because GR00T N1.7's VLM *is* a robot-finetuned Cosmos-Reason2-2B. All the
+option did was discard GR00T's robot adaptation — and it did so **silently**, since a
+missing `BASE_MODEL_PATH` produced a perfectly normal-looking run on un-adapted weights.
+An empty value is now a hard error, raised before training starts.
+
+To start a genuinely fresh perception run, a new `RUN_NAME` is all you need — an empty
+output dir means training starts at step 0 with a fresh head:
 
 ```bash
-RUN_NAME=perception_scratch BASE_MODEL_PATH=scratch bash start_finetune_perception.sh
+RUN_NAME=perception_v5 bash start_finetune_perception.sh
 # on Euler:
-RUN_NAME=perception_scratch BASE_MODEL_PATH=scratch sbatch submit_perception_euler.sh
+RUN_NAME=perception_v5 sbatch submit_perception_euler.sh
 ```
 
-A new `RUN_NAME` (→ empty output dir) alone already means a fresh run that trains
-from step 0; `BASE_MODEL_PATH=scratch` additionally drops the GR00T-N1.7-3B overlay.
+Note that `checkpoints-perception_v3_negatives` was trained with
+`start_from_checkpoint: nvidia/GR00T-N1.7-3B` at `select_layer: 12` and 736/662 px — match
+those if you want a comparable run, since `select_layer` now defaults to 16.
 
 **After a model change you must bump `RUN_NAME`.** Reusing a name auto-resumes the
 last checkpoint in its output dir, and a checkpoint written before the change lacks

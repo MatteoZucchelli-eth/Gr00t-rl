@@ -17,6 +17,15 @@
 from dataclasses import dataclass
 
 
+GR00T_VLM_CHECKPOINT = "nvidia/GR00T-N1.7-3B"
+"""The GR00T N1.7 release whose VLM backbone the perception finetune starts from.
+
+Its backbone is a robot-finetuned nvidia/Cosmos-Reason2-2B, which is also the
+architecture every model here is constructed from; only the weights differ. The
+~1B action-head tensors in this checkpoint are simply not loaded by the perception
+pipeline."""
+
+
 @dataclass
 class FinetuneConfig:
     """
@@ -340,9 +349,27 @@ class FinetuneConfig:
 
 
 @dataclass
-class _PerceptionCommonConfig:
-    """Settings of the perception-only finetune, kept in a base class so
-    `base_model_path` can be declared last (dataclass field ordering)."""
+class PerceptionFinetuneConfig:
+    """Fine-tune the perception-only model (GR00T VLM backbone + target heatmap head).
+
+    The model sees ONLY the current wrist-camera frame + instruction and predicts the
+    wall-target location as a heatmap in wrist-camera pixels, a visibility flag, and
+    optionally target depth / wall normal. Training samples every frame represented in
+    the heatmap_labels/ sidecar next to data/.
+    """
+
+    base_model_path: str = GR00T_VLM_CHECKPOINT
+    """Checkpoint supplying the VLM backbone weights. Must be GR00T-lineage: either
+    `nvidia/GR00T-N1.7-3B` itself (the default), one of your finetuned VLA runs
+    (action-head weights are ignored, only the backbone is taken), or a previous
+    perception checkpoint.
+
+    There is deliberately NO "start from the bare Cosmos-Reason2-2B foundation" option.
+    The backbone ARCHITECTURE is always Cosmos-Reason2-2B -- GR00T N1.7's VLM is that
+    same 2B model, robot-finetuned -- so the only thing this choice ever controlled was
+    whether GR00T's weights got overlaid on top or not, and not overlaying them throws
+    away the robot adaptation for nothing. Passing an empty value is an error rather
+    than a silent fall-back to the raw foundation weights."""
 
     dataset_path: str = "./g1_dataset"
     """Path to the dataset root (must contain the heatmap_labels/ sidecar directory)."""
@@ -447,20 +474,3 @@ class _PerceptionCommonConfig:
     save_only_model: bool = False
     skip_weight_loading: bool = False
     """If True, skip loading weights from base_model_path (smoke tests)."""
-
-
-@dataclass
-class PerceptionFinetuneConfig(_PerceptionCommonConfig):
-    """Fine-tune the perception-only model (VLM backbone + target heatmap head).
-
-    The model sees ONLY the current wrist-camera frame + instruction and predicts the
-    wall-target location as a heatmap in wrist-camera pixels, a visibility flag, and
-    optionally target depth / wall normal. Training samples every frame represented in
-    the heatmap_labels/ sidecar next to data/.
-    """
-
-    base_model_path: str | None = None
-    """Checkpoint to initialize the VLM backbone from. Accepts a full VLA checkpoint
-    (e.g. one of your finetuned GR00T runs — action-head weights are ignored) or a
-    previous perception checkpoint. If None, starts from the raw Cosmos-Reason2-2B
-    backbone weights."""

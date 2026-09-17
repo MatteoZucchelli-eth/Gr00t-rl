@@ -16,29 +16,38 @@ RUN_NAME="${RUN_NAME:-perception_v1}"
 # cross-attention (--use-text-conditioning, on by default) is there to exploit.
 DATASET_DIR="${DATASET_DIR:-./g1_dataset_small_general/}"
 
-# Backbone init. Three choices:
-#   - A finetuned VLA run. Action-head weights are ignored, only the backbone is
-#     inherited. NOT recommended as of 2026-07-31: every VLA run to date actually
-#     trained at 256px (the resolution overrides were silently dropped until commit
-#     a66a334), so such a checkpoint's vision encoder is adapted to 256px and is a
-#     WORSE init than the foundation weights for a 736px perception run. Revisit
-#     once you have a VLA checkpoint whose logs confirm a matching resolution.
+# Backbone init. The backbone weights MUST be GR00T-lineage; two choices:
 #   - nvidia/GR00T-N1.7-3B (the GR00T foundation VLA) — the default.
-#   - "scratch" / "none" / "" (empty) — do NOT overlay any VLA checkpoint. The
-#     VLM backbone still starts from the published Cosmos-Reason2-2B foundation
-#     weights (that 2B VLM is never randomly initialised); only the perception
-#     head is fresh. This is the "finetune GR00T from scratch" option: nothing
-#     from your earlier drilling runs is inherited.
+#   - A finetuned VLA run of yours, or a previous perception checkpoint. Action-head
+#     weights are ignored, only the backbone is inherited. A VLA run is NOT recommended
+#     as of 2026-07-31: every VLA run to date actually trained at 256px (the resolution
+#     overrides were silently dropped until commit a66a334), so such a checkpoint's
+#     vision encoder is adapted to 256px and is a WORSE init than the GR00T foundation
+#     weights for a 736px perception run. Revisit once you have a VLA checkpoint whose
+#     [resolution] log line confirms a matching resolution.
+#
+# The old "scratch" / "none" / "" option — overlay nothing and train the bare
+# Cosmos-Reason2-2B foundation — has been REMOVED. It was never "training from scratch":
+# the backbone ARCHITECTURE is always Cosmos-Reason2-2B (GR00T N1.7's VLM is that same
+# 2B model, robot-finetuned), so the only thing that option ever did was skip the overlay
+# and throw GR00T's robot adaptation away. Worse, it failed silently — a missing
+# BASE_MODEL_PATH produced a normal-looking run on un-adapted weights. Passing an empty
+# value is now an error, raised by Gr00tN1d7PerceptionPipeline before training starts.
 BASE_MODEL_PATH="${BASE_MODEL_PATH:-nvidia/GR00T-N1.7-3B}"
 
-# Build the base-model CLI arg. When BASE_MODEL_PATH is empty/scratch/none we omit
-# the flag entirely, so the config default (base_model_path=None) is used and no
-# checkpoint is overlaid.
-BASE_MODEL_ARG=(--base-model-path "${BASE_MODEL_PATH}")
+# Reject the retired sentinels by name. Left alone they would sail past the "is it
+# empty" check as a literal path and die much later inside the checkpoint loader with
+# an unhelpful "no safetensors found in scratch".
 case "${BASE_MODEL_PATH,,}" in
-    ""|scratch|none|fresh)
-        BASE_MODEL_ARG=()
-        BASE_MODEL_PATH="<none: raw Cosmos-Reason2-2B backbone + fresh head>"
+    scratch|none|fresh)
+        echo "[train] ERROR: BASE_MODEL_PATH=${BASE_MODEL_PATH} is no longer supported." >&2
+        echo "[train]   That used to skip the overlay and train the bare Cosmos-Reason2-2B" >&2
+        echo "[train]   foundation, which was never 'from scratch' — the architecture is" >&2
+        echo "[train]   Cosmos either way, so it only discarded GR00T's robot adaptation." >&2
+        echo "[train]   For a fresh run just use a new RUN_NAME; the perception head is" >&2
+        echo "[train]   always freshly initialised. Leave BASE_MODEL_PATH unset for the" >&2
+        echo "[train]   nvidia/GR00T-N1.7-3B default." >&2
+        exit 1
         ;;
 esac
 
@@ -113,7 +122,7 @@ fi
 set +e
 torchrun --nproc_per_node=2 --master_port=$MASTER_PORT \
     gr00t/experiment/launch_finetune_perception.py \
-    "${BASE_MODEL_ARG[@]}" \
+    --base-model-path "${BASE_MODEL_PATH}" \
     --dataset-path "${DATASET_DIR}" \
     --embodiment-tag NEW_EMBODIMENT \
     --modality-config-path register_perception_modality.py \

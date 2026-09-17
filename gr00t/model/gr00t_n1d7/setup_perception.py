@@ -107,14 +107,40 @@ class Gr00tN1d7PerceptionPipeline(Gr00tN1d7Pipeline):
         (the full VLA), so the perception model is constructed from the
         perception config and only matching weights are transferred.
         """
+        # Checked BEFORE constructing anything: the backbone is a 2B model that gets
+        # downloaded and materialized, and there is no point paying for that to then
+        # fail. No silent fall-back to the bare Cosmos-Reason2-2B foundation weights
+        # either -- the backbone is ALWAYS built from that architecture, so a missing
+        # checkpoint would not fail loudly, it would just train the un-adapted
+        # foundation and look like a perfectly normal run.
+        skip_weight_loading = getattr(self.config.training, "skip_weight_loading", False)
+        checkpoint = self.config.training.start_from_checkpoint
+        # "scratch"/"none"/"fresh" were the sentinels that selected the removed
+        # bare-Cosmos path; treat them as the mistake they now are rather than letting
+        # them reach the loader as a literal directory name.
+        if isinstance(checkpoint, str) and checkpoint.strip().lower() in {
+            "scratch",
+            "none",
+            "fresh",
+        }:
+            checkpoint = None
+        if not skip_weight_loading and not checkpoint:
+            raise ValueError(
+                "The perception finetune requires a GR00T-lineage backbone checkpoint: "
+                "pass --base-model-path (nvidia/GR00T-N1.7-3B, one of your VLA runs, or "
+                "a previous perception checkpoint). Starting from the bare "
+                "Cosmos-Reason2-2B foundation is no longer supported -- it threw away "
+                "GR00T's robot adaptation for no gain. Use --skip-weight-loading only "
+                "for architecture-only smoke tests."
+            )
+
         model = self.model_class(
             self.config.model,
             transformers_loading_kwargs=self.transformers_loading_kwargs,
         )
 
-        skip_weight_loading = getattr(self.config.training, "skip_weight_loading", False)
-        if self.config.training.start_from_checkpoint is not None and not skip_weight_loading:
-            load_matching_weights(model, self.config.training.start_from_checkpoint)
+        if not skip_weight_loading:
+            load_matching_weights(model, checkpoint)
 
         # Re-apply trainable flags after weight loading.
         model.backbone.set_trainable_parameters(

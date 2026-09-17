@@ -34,16 +34,22 @@
 #        start_finetune_perception.sh, setup_and_train_perception.sh,
 #        register_perception_modality.py, gr00t/
 #
-#   3. BASE_MODEL_PATH must be reachable INSIDE the container. Scratch is
-#      mounted as /groot, so a finetuned VLA run lives at e.g.
-#      /groot/runs/<run_name>/checkpoint-XXXX. An HF id like
+#   3. BASE_MODEL_PATH must be reachable INSIDE the container and must be
+#      GR00T-lineage. Scratch is mounted as /groot, so a finetuned VLA run lives at
+#      e.g. /groot/runs/<run_name>/checkpoint-XXXX. An HF id like
 #      nvidia/GR00T-N1.7-3B also works (downloads via HF_TOKEN from .env).
 #      Keep the default unless you have a reason not to. Initialising from one of
 #      your own VLA runs used to be the advice, on the assumption they were 720px;
 #      they were not. Until commit a66a334 the processor silently dropped the
 #      resolution overrides, so every VLA run trained at 256px and its vision
-#      encoder is adapted to that, making it a worse init here than the foundation
+#      encoder is adapted to that, making it a worse init here than the GR00T
 #      weights. Check a candidate's [resolution] log line before trusting it.
+#
+#      There is no "bare Cosmos-Reason2-2B" option any more. The backbone
+#      ARCHITECTURE is always Cosmos-Reason2-2B — GR00T N1.7's VLM is that same 2B
+#      model, robot-finetuned — so skipping the overlay never meant "from scratch",
+#      it just discarded the robot adaptation, and it did so silently. An empty
+#      BASE_MODEL_PATH is now a hard error.
 # =============================================================================
 
 set -euo pipefail
