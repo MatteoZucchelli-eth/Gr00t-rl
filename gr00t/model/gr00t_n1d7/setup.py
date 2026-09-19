@@ -144,14 +144,21 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 model.action_head.tip_target_head.reset_parameters()
                 logging.info("tip_target_head not in checkpoint - re-initialized explicitly")
 
+            # Same story for the persistent scheduled-sampling buffers
+            # (action_head.tip_target_tf_*): they live on the action head rather than
+            # inside tip_target_head, so they need their own re-initialization.
+            if self.config.model.use_tip_target_head and any(
+                "tip_target_tf_" in key for key in missing_keys
+            ):
+                model.action_head.reset_tip_target_tf_state()
+                logging.info("tip_target teacher-forcing state not in checkpoint - schedule reset")
+
             unexpected_keys = loading_info.get("unexpected_keys", [])
             # Mirror the missing-keys tolerance above: a checkpoint trained WITH
             # an auxiliary head (or its conditioning embed) can be loaded with
             # that option disabled — the now-unused head weights are dropped
             # instead of hard-failing.
-            dropped_aux = [
-                k for k in unexpected_keys if "progress_head" in k or "tip_target_head" in k
-            ]
+            dropped_aux = [k for k in unexpected_keys if "progress_head" in k or "tip_target" in k]
             if dropped_aux:
                 logging.info(
                     f"auxiliary head weights in checkpoint ignored (head disabled): {dropped_aux}"
@@ -161,7 +168,7 @@ class Gr00tN1d7Pipeline(ModelPipeline):
             other_missing = [
                 k
                 for k in missing_keys
-                if "mask_token" not in k and "progress_head" not in k and "tip_target_head" not in k
+                if "mask_token" not in k and "progress_head" not in k and "tip_target" not in k
             ]
             errors = []
             if other_missing:

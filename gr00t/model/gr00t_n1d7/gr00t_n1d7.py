@@ -448,6 +448,24 @@ class Gr00tN1d7ActionHead(nn.Module):
         backbone_output["backbone_features"] = backbone_features
         return backbone_output
 
+    def reset_tip_target_tf_state(self) -> None:
+        """Reset the scheduled-sampling buffers to their fresh-start values.
+
+        Same meta-device caveat as `TipTargetHead.reset_parameters`: these buffers are
+        persistent (so a requeued job resumes its schedule) and therefore absent from a
+        base checkpoint that never had the head. transformers materializes missing keys
+        as raw memory and its `_init_weights` fallback only touches parameters, so
+        without this the step counter starts at garbage and the gate can open on the
+        first step.
+        """
+        if not self.use_tip_target_head:
+            return
+        with torch.no_grad():
+            self.tip_target_tf_err_ema.fill_(float("nan"))
+            self.tip_target_tf_hold.zero_()
+            self.tip_target_tf_open_step.fill_(-1)
+            self.tip_target_tf_step.zero_()
+
     def _tip_target_pos_residual_cam(
         self, pred_scaled: torch.Tensor, tgt_scaled: torch.Tensor
     ) -> torch.Tensor:

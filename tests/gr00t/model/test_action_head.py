@@ -579,6 +579,32 @@ class TestTipTargetTeacherForcingSchedule:
         assert resumed.tip_target_tf_open_step.item() == head.tip_target_tf_open_step.item()
         assert resumed.tip_target_tf_step.item() == head.tip_target_tf_step.item()
 
+    def test_reset_restores_a_fresh_schedule(self):
+        """A base checkpoint has no tf_* buffers; the reset must undo the garbage."""
+        head = self._head()
+        for _ in range(6):
+            head._tip_target_pred_prob(torch.tensor(1.0))
+        assert head.tip_target_tf_open_step.item() >= 0
+
+        # Stand in for what transformers leaves behind for missing buffers.
+        with torch.no_grad():
+            head.tip_target_tf_step.fill_(123456)
+            head.tip_target_tf_hold.fill_(99)
+            head.tip_target_tf_err_ema.fill_(0.0)
+        head.reset_tip_target_tf_state()
+
+        assert head.tip_target_tf_step.item() == 0
+        assert head.tip_target_tf_hold.item() == 0
+        assert head.tip_target_tf_open_step.item() == -1
+        assert torch.isnan(head.tip_target_tf_err_ema)
+        # And the gate takes the full patience window again.
+        assert head._tip_target_pred_prob(torch.tensor(1.0)) == 0.0
+        assert head.tip_target_tf_open_step.item() == -1
+
+    def test_reset_is_a_no_op_without_the_head(self):
+        head = Gr00tN1d7ActionHead(_small_config(use_tip_target_head=False))
+        head.reset_tip_target_tf_state()
+
     def test_disabled_by_default(self):
         head = Gr00tN1d7ActionHead(
             _small_config(use_tip_target_head=True, tip_target_loss_weight=0.5)
