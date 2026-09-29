@@ -23,10 +23,10 @@ from .gr00t_n1d7 import Gr00tN1d7Config
 class Gr00tN1d7PerceptionConfig(Gr00tN1d7Config):
     """Config for the perception-only GR00T model (VLM backbone + target heatmap head).
 
-    Used by the short-range fine-approach stage: the model sees ONLY the wrist
-    camera (single current frame) + the task instruction, and predicts
+    The model sees one camera (wrist or head, single current frame) plus the
+    task instruction, and predicts
       - a spatial heatmap over the VLM image-token grid locating the wall
-        target in wrist-camera pixel coordinates,
+        target in the selected camera's pixel coordinates,
       - a subpixel (du, dv) offset at each cell (CenterNet-style refinement),
       - a visibility logit ("is the target in this image at all?"),
       - optionally the target depth (camera-frame z) and the wall normal.

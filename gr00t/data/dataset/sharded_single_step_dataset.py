@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -167,6 +168,7 @@ class ShardedSingleStepDataset(ShardedDataset):
         seed: int = 42,
         allow_padding: bool = False,
         perception_labels_only: bool = False,
+        heatmap_labels_dir: str = "heatmap_labels",
     ):
         """Initialize single-step dataset with sharding configuration."""
         super().__init__(dataset_path)
@@ -189,7 +191,21 @@ class ShardedSingleStepDataset(ShardedDataset):
             modality_configs=modality_configs,
             video_backend=video_backend,
             video_backend_kwargs=video_backend_kwargs,
+            heatmap_labels_dir=heatmap_labels_dir,
         )
+
+        if perception_labels_only:
+            labels_info = Path(self.dataset_path) / heatmap_labels_dir / "labels_info.json"
+            if labels_info.exists():
+                label_video = json.loads(labels_info.read_text())["video_key"]
+                video_keys = [
+                    self.episode_loader.modality_meta["video"][key].get("original_key", key)
+                    for key in modality_configs["video"].modality_keys
+                ]
+                if video_keys != [label_video]:
+                    raise ValueError(
+                        f"{labels_info} labels {label_video}, but the model reads {video_keys}"
+                    )
 
         # Create balanced shards from episode timesteps
         self.shard_dataset()

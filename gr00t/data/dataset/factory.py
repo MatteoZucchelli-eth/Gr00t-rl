@@ -72,6 +72,7 @@ class DatasetFactory:
                     seed=self.config.data.seed,
                     allow_padding=self.config.data.allow_padding,
                     perception_labels_only=self.config.data.perception_labels_only,
+                    heatmap_labels_dir=self.config.data.heatmap_labels_dir,
                 )
                 datasets.append(dataset)
             dataset_lengths = np.array([len(dataset) for dataset in datasets])

@@ -54,6 +54,13 @@
 
 set -euo pipefail
 
+PERCEPTION_CAMERA="${PERCEPTION_CAMERA:-wrist}"
+if [ "$PERCEPTION_CAMERA" = head ]; then
+    HEATMAP_LABELS_DIR="${HEATMAP_LABELS_DIR:-heatmap_labels_head}"
+else
+    HEATMAP_LABELS_DIR="${HEATMAP_LABELS_DIR:-heatmap_labels}"
+fi
+
 # --- Load modules ---
 module load eth_proxy
 
@@ -89,8 +96,8 @@ mkdir -p "$GROOT_DIR/runs"
 mkdir -p "$RESULTS_DIR"
 
 # --- Sanity: the dataset must ship the heatmap label sidecar ---
-if [ ! -d "$DATASET_HOST_DIR/heatmap_labels" ]; then
-    echo "[euler] ERROR: $DATASET_HOST_DIR/heatmap_labels not found."
+if [ ! -d "$DATASET_HOST_DIR/$HEATMAP_LABELS_DIR" ]; then
+    echo "[euler] ERROR: $DATASET_HOST_DIR/$HEATMAP_LABELS_DIR not found."
     echo "[euler] The perception finetune trains on fine-phase frames from the"
     echo "[euler] heatmap_labels/ sidecar. Rsync the dataset including it (see header)."
     exit 1
@@ -129,11 +136,14 @@ time apptainer exec --nv \
     --bind "$PROJECT_DIR/setup_and_train_perception.sh:/workspace/setup_and_train_perception.sh" \
     --bind "$PROJECT_DIR/start_finetune_perception.sh:/workspace/start_finetune_perception.sh" \
     --bind "$PROJECT_DIR/register_perception_modality.py:/workspace/register_perception_modality.py" \
+    --bind "$PROJECT_DIR/register_head_perception_modality.py:/workspace/register_head_perception_modality.py" \
     --bind "$DATASET_LOCAL_DIR:/workspace/$DATASET_NAME" \
     --env TRITON_CACHE_DIR=/groot/cache/triton \
     --env TORCH_EXTENSIONS_DIR=/groot/cache/torch_kernels \
     --env XDG_CACHE_HOME=/groot/cache \
     --env RUN_NAME="${RUN_NAME:-perception_v1}" \
+    --env PERCEPTION_CAMERA="$PERCEPTION_CAMERA" \
+    --env HEATMAP_LABELS_DIR="$HEATMAP_LABELS_DIR" \
     --env BASE_MODEL_PATH="$BASE_MODEL_PATH" \
     --env HEATMAP_SIGMA_PX="${HEATMAP_SIGMA_PX:-}" \
     --env HEATMAP_LOSS_WEIGHT="${HEATMAP_LOSS_WEIGHT:-}" \

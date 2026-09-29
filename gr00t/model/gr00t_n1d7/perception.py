@@ -16,14 +16,13 @@
 """Perception-only GR00T model for the short-range fine approach.
 
 VLM backbone (Cosmos-Reason2 / Qwen3-VL, same as Gr00tN1d7) + a target heatmap
-head. Input: the CURRENT wrist-camera frame + task instruction. Output: where
-the wall target is in wrist-camera pixel coordinates (heatmap over the VLM
+head. Input: the CURRENT selected-camera frame + task instruction. Output: where
+the wall target is in that camera's pixel coordinates (heatmap over the VLM
 image-token grid + subpixel offset), whether it is visible at all, and
 optionally its depth and the wall normal in the camera frame.
 
-There is no action head: this model does perception only. The coarse approach
-keeps using the full VLA; this model takes over close to the wall, where the
-heatmap_labels/ sidecar provides supervision on every recorded frame.
+There is no action head: this model does perception only. The modality config
+selects wrist_view or ego_view, and the corresponding sidecar supplies labels.
 """
 
 import logging
@@ -208,7 +207,7 @@ def image_token_grid(
     B = vl_embeds.shape[0]
     assert image_grid_thw.shape[0] == B, (
         f"Perception head expects exactly 1 image per sample, got "
-        f"{image_grid_thw.shape[0]} images for batch of {B}. Use a wrist-only "
+        f"{image_grid_thw.shape[0]} images for batch of {B}. Use a single-camera "
         f"modality config with video delta_indices=[0]."
     )
     t, h, w = (int(x) for x in image_grid_thw[0])
@@ -281,6 +280,75 @@ def decode_uv(
     cx = (best % gw).float() + 0.5 + off[:, 0]
     cy = (best // gw).float() + 0.5 + off[:, 1]
     return torch.stack((cx / gw * proc_w, cy / gh * proc_h), dim=-1)
+
+
+def decode_uv_topk(
+    heat_logits: torch.Tensor,
+    offsets: torch.Tensor,
+    gh: int,
+    gw: int,
+    proc_w: float,
+    proc_h: float,
+    k: int,
+    min_separation_cells: int = 2,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """The k strongest *distinct* modes, each with its own subpixel offset.
+
+    :func:`decode_uv` answers with the argmax alone, which is the whole answer
+    only while the heatmap is unimodal. With a distractor in frame it is not:
+    the board's other square is a second mode, and which of the two happens to
+    be higher on a given frame decides the entire detection. Returning both
+    lets a caller choose on evidence this model does not have -- a second
+    model's opinion of where the target is, in the g1_control planner's case.
+
+    Modes are separated by greedy non-maximum suppression on the token grid
+    rather than by taking the top k cells outright: a peaked heatmap's
+    runner-up cells are the argmax's own neighbours, so a raw top-k reports one
+    square k times over. ``min_separation_cells`` is the Chebyshev radius
+    suppressed around each winner (0 disables NMS and returns the raw top-k).
+
+    Returns ``(uv, prob)`` -- (B, k, 2) in processed-image px, strongest first,
+    and (B, k) softmax probabilities of the winning cells. ``uv[:, 0]`` is by
+    construction exactly what :func:`decode_uv` returns, so a caller that keeps
+    the first candidate has changed nothing. When the grid runs out of distinct
+    modes the remaining slots repeat the last one found at probability 0, so
+    the shape never depends on the picture.
+    """
+    B, N = heat_logits.shape
+    k = max(1, int(k))
+    radius = max(0, int(min_separation_cells))
+    device = heat_logits.device
+    probs = F.softmax(heat_logits, dim=-1)
+
+    rows = torch.arange(gh, device=device).view(1, gh, 1)
+    cols = torch.arange(gw, device=device).view(1, 1, gw)
+    work = heat_logits.clone()
+    batch = torch.arange(B, device=device)
+
+    uv_out = torch.zeros(B, k, 2, dtype=heat_logits.dtype, device=device)
+    prob_out = torch.zeros(B, k, dtype=probs.dtype, device=device)
+    for i in range(k):
+        alive = torch.isfinite(work).any(dim=-1)  # (B,) grid not yet exhausted
+        best = work.argmax(dim=-1)  # (B,)
+        off = offsets[batch, best].clamp(-0.5, 0.5)
+        cx = (best % gw).float() + 0.5 + off[:, 0]
+        cy = (best // gw).float() + 0.5 + off[:, 1]
+        uv = torch.stack((cx / gw * proc_w, cy / gh * proc_h), dim=-1)
+        # An exhausted grid repeats the previous candidate rather than
+        # inventing one: a zero probability is what says "there was no i-th
+        # mode", and a caller reading only the probability cannot then be
+        # handed a uv that means nothing.
+        uv_out[:, i] = torch.where(alive.view(B, 1), uv, uv_out[:, max(i - 1, 0)])
+        prob_out[:, i] = torch.where(
+            alive, probs[batch, best], torch.zeros_like(prob_out[:, i])
+        )
+        if i + 1 == k:
+            break
+        br = (best // gw).view(B, 1, 1)
+        bc = (best % gw).view(B, 1, 1)
+        suppress = ((rows - br).abs() <= radius) & ((cols - bc).abs() <= radius)
+        work = work.view(B, gh, gw).masked_fill(suppress, float("-inf")).view(B, N)
+    return uv_out, prob_out
 
 
 def perception_losses(
@@ -585,8 +653,16 @@ class Gr00tN1d7Perception(PreTrainedModel):
     # Inference
     # ------------------------------------------------------------------
     @torch.no_grad()
-    def predict(self, inputs: dict) -> BatchFeature:
+    def predict(
+        self, inputs: dict, topk: int = 0, peak_min_separation_cells: int = 2
+    ) -> BatchFeature:
         """Run perception on processed inputs (from the perception processor).
+
+        Args:
+            topk: also decode this many distinct heatmap modes (0 = off). The
+                first is the argmax `target_uv` already reported, so asking for
+                them costs one decode and changes nothing about the answer.
+            peak_min_separation_cells: NMS radius those modes are separated by.
 
         Returns:
             target_uv: (B, 2) predicted target center, processed-image px
@@ -595,6 +671,9 @@ class Gr00tN1d7Perception(PreTrainedModel):
             heatmap: (B, gh, gw) softmax heatmap over the token grid
             depth: (B,) target depth in metres (if the depth head is enabled)
             wall_normal: (B, 3) wall normal in camera frame (if enabled)
+            target_uv_topk: (B, topk, 2) processed-image px, strongest first
+                            (only when topk > 0)
+            heat_topk: (B, topk) softmax probability of each (only when topk > 0)
         """
         inputs = self.prepare_input(inputs)
         backbone_output = self.backbone(BatchFeature(data=inputs))
@@ -614,6 +693,20 @@ class Gr00tN1d7Perception(PreTrainedModel):
             result["depth"] = head_out["depth_scaled"].float() * self.config.depth_scale
         if self.perception_head.use_normal:
             result["wall_normal"] = F.normalize(head_out["wall_normal"].float(), dim=-1)
+        if topk and int(topk) > 0:
+            proc_w, proc_h = self._processed_image_size()
+            uv_topk, heat_topk = decode_uv_topk(
+                heat_logits,
+                offsets,
+                gh,
+                gw,
+                proc_w,
+                proc_h,
+                int(topk),
+                peak_min_separation_cells,
+            )
+            result["target_uv_topk"] = uv_topk
+            result["heat_topk"] = heat_topk
         return BatchFeature(data=result)
 
     def uv_processed_to_camera(

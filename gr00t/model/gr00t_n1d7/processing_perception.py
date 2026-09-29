@@ -113,8 +113,8 @@ class Gr00tN1d7PerceptionProcessor(Gr00tN1d7Processor):
     ):
         """Single-view, single-frame transform that carries the target keypoint."""
         assert len(image_keys) == 1, (
-            f"Perception processor expects exactly one camera view (the wrist), "
-            f"got {image_keys}. Use a wrist-only modality config."
+            f"Perception processor expects exactly one camera view, "
+            f"got {image_keys}. Use a single-camera modality config."
         )
         view = image_keys[0]
         frames = images[view]

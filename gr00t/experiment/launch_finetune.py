@@ -60,7 +60,9 @@ def count_trainable_steps(dataset_path: str, action_horizon: int) -> int:
     return sum(max(0, length - action_horizon + 1) for length in lengths)
 
 
-def count_perception_label_steps(dataset_path: str, action_horizon: int) -> int:
+def count_perception_label_steps(
+    dataset_path: str, action_horizon: int, heatmap_labels_dir: str = "heatmap_labels"
+) -> int:
     """Trainable steps represented by perception-label sidecars.
 
     Mirrors ``ShardedSingleStepDataset.get_valid_step_indices`` with
@@ -84,11 +86,11 @@ def count_perception_label_steps(dataset_path: str, action_horizon: int) -> int:
     # chunking differs from meta/info.json still resolves.
     label_files = {
         int(p.stem.split("_")[1]): p
-        for p in (root / "heatmap_labels").glob("chunk-*/episode_*.parquet")
+        for p in (root / heatmap_labels_dir).glob("chunk-*/episode_*.parquet")
     }
     if not label_files:
         raise FileNotFoundError(
-            f"Cannot derive max_steps from --num-epochs: no heatmap_labels/ parquets "
+            f"Cannot derive max_steps from --num-epochs: no {heatmap_labels_dir}/ parquets "
             f"under {root}. Pass --max-steps instead."
         )
 
@@ -152,7 +154,11 @@ def resolve_max_steps(
 
     action_horizon = resolve_action_horizon(embodiment_tag)
     if perception_labels_only:
-        trainable = count_perception_label_steps(ft_config.dataset_path, action_horizon)
+        trainable = count_perception_label_steps(
+            ft_config.dataset_path,
+            action_horizon,
+            getattr(ft_config, "heatmap_labels_dir", "heatmap_labels"),
+        )
     else:
         trainable = count_trainable_steps(ft_config.dataset_path, action_horizon)
     per_step = ft_config.global_batch_size * ft_config.gradient_accumulation_steps

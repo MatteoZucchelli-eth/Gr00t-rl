@@ -124,6 +124,7 @@ class LeRobotEpisodeLoader:
         modality_configs: dict[str, ModalityConfig],
         video_backend: str = "torchcodec",
         video_backend_kwargs: dict[str, Any] | None = None,
+        heatmap_labels_dir: str = HEATMAP_LABELS_DIR_NAME,
     ) -> None:
         """
         Initialize LeRobot episode loader with dataset path and modality configurations.
@@ -136,6 +137,7 @@ class LeRobotEpisodeLoader:
         self.dataset_path = Path(dataset_path)
         self.video_backend = video_backend
         self.video_backend_kwargs = video_backend_kwargs
+        self.heatmap_labels_dir = heatmap_labels_dir
 
         if not self.dataset_path.is_dir():
             raise FileNotFoundError(f"Dataset path does not exist: {self.dataset_path}")
@@ -420,7 +422,7 @@ class LeRobotEpisodeLoader:
         chunk_idx = episode_index // self.chunk_size
         return (
             self.dataset_path
-            / HEATMAP_LABELS_DIR_NAME
+            / self.heatmap_labels_dir
             / f"chunk-{chunk_idx:03d}"
             / f"episode_{episode_index:06d}.parquet"
         )

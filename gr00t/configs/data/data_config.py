@@ -84,6 +84,8 @@ class DataConfig:
     # has one row per source frame; all of those rows are used. Episodes without
     # labels are skipped. Used by both perception finetunes.
     perception_labels_only: bool = False
+    heatmap_labels_dir: str = "heatmap_labels"
+    """Perception sidecar directory relative to the dataset root."""
 
     # Data loading
     shuffle: bool = True

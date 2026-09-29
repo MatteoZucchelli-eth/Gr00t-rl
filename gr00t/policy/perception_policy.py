@@ -56,6 +56,15 @@ class PerceptionPolicy(BasePolicy):
         target_depth_m          (B,)    camera-frame depth (if the depth head is on)
         wall_normal_cam         (B, 3)  unit wall normal in camera frame (if on)
     `info` carries the full softmax heatmap (B, gh, gw) when options={"return_heatmap": True}.
+
+    With options={"topk_peaks": k} the action dict also carries the k strongest
+    *distinct* heatmap modes, which is what a caller needs when a distractor is
+    in frame: the head is decoded by argmax, so on those frames the answer is
+    whichever square happened to peak higher, and the other one is sitting right
+    there in the heatmap. Candidate 0 is the argmax, i.e. exactly `target_uv_px`.
+
+        target_uv_peaks_px  (B, k, 2)  candidates in RAW wrist-camera px
+        peak_probs          (B, k)     their softmax probabilities
     """
 
     def __init__(
@@ -176,6 +185,8 @@ class PerceptionPolicy(BasePolicy):
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         options = options or {}
         return_heatmap = bool(options.get("return_heatmap", False))
+        topk_peaks = int(options.get("topk_peaks", 0) or 0)
+        peak_min_separation_cells = int(options.get("peak_min_separation_cells", 2))
 
         unbatched = self._unbatch(observation)
         processed = []
@@ -200,7 +211,11 @@ class PerceptionPolicy(BasePolicy):
         collated = self.collate_fn(processed)  # BatchFeature({"inputs": {...}})
 
         with torch.inference_mode():
-            pred = self.model.predict(**collated)  # model handles device/dtype cast
+            pred = self.model.predict(  # model handles device/dtype cast
+                **collated,
+                topk=topk_peaks,
+                peak_min_separation_cells=peak_min_separation_cells,
+            )
 
         uv_proc = pred["target_uv"].float().cpu()  # (B, 2)
         cam_uv = torch.stack(
@@ -220,6 +235,24 @@ class PerceptionPolicy(BasePolicy):
             action["target_depth_m"] = pred["depth"].float().cpu().numpy().astype(np.float32)
         if "wall_normal" in pred:
             action["wall_normal_cam"] = pred["wall_normal"].float().cpu().numpy().astype(np.float32)
+        if "target_uv_topk" in pred:
+            # Mapped back to camera px one sample at a time, exactly as the
+            # argmax above is: the transform depends on that sample's own
+            # camera size, and a batch may mix sizes.
+            uv_topk = pred["target_uv_topk"].float().cpu()  # (B, k, 2)
+            action["target_uv_peaks_px"] = (
+                torch.stack(
+                    [
+                        self.model.uv_processed_to_camera(
+                            uv_topk[i], camera_size=cam_sizes[i]
+                        )
+                        for i in range(uv_topk.shape[0])
+                    ]
+                )
+                .numpy()
+                .astype(np.float32)
+            )
+            action["peak_probs"] = pred["heat_topk"].float().cpu().numpy().astype(np.float32)
 
         info: dict[str, Any] = {}
         if return_heatmap:

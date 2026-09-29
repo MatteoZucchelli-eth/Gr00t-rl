@@ -3,6 +3,23 @@ set -euo pipefail
 
 source .env
 
+# Share the wrist architecture, losses and launcher; select only camera/sidecar.
+PERCEPTION_CAMERA="${PERCEPTION_CAMERA:-wrist}"
+case "$PERCEPTION_CAMERA" in
+    wrist)
+        MODALITY_CONFIG_PATH=register_perception_modality.py
+        HEATMAP_LABELS_DIR="${HEATMAP_LABELS_DIR:-heatmap_labels}"
+        ;;
+    head)
+        MODALITY_CONFIG_PATH=register_head_perception_modality.py
+        HEATMAP_LABELS_DIR="${HEATMAP_LABELS_DIR:-heatmap_labels_head}"
+        RUN_NAME="${RUN_NAME:-head_perception_v1}"
+        IMAGE_TARGET_SIZE="${IMAGE_TARGET_SIZE:-480}"
+        IMAGE_CROP_SIZE="${IMAGE_CROP_SIZE:-432}"
+        ;;
+    *) echo "Unknown PERCEPTION_CAMERA=$PERCEPTION_CAMERA" >&2; exit 1 ;;
+esac
+
 # Fine-approach PERCEPTION model: GR00T VLM backbone + target heatmap head.
 # Wrist camera only, every frame in the heatmap_labels/ sidecar.
 # Keep RUN_NAME stable across resubmissions of the SAME experiment so training
@@ -105,6 +122,7 @@ OUTPUT_DIR="${GROOT_HOME:-/groot}/runs/${RUN_NAME}"
 
 echo "[train] RUN_NAME=${RUN_NAME}"
 echo "[train] DATASET_DIR=${DATASET_DIR}"
+echo "[train] CAMERA=${PERCEPTION_CAMERA} LABELS=${HEATMAP_LABELS_DIR}"
 echo "[train] OUTPUT_DIR=${OUTPUT_DIR}"
 echo "[train] BASE_MODEL_PATH=${BASE_MODEL_PATH}"
 echo "[train] RESOLUTION target=${IMAGE_TARGET_SIZE} crop=${IMAGE_CROP_SIZE} (crop is a zoom aug; output is ${IMAGE_TARGET_SIZE}px)"
@@ -125,7 +143,8 @@ torchrun --nproc_per_node=2 --master_port=$MASTER_PORT \
     --base-model-path "${BASE_MODEL_PATH}" \
     --dataset-path "${DATASET_DIR}" \
     --embodiment-tag NEW_EMBODIMENT \
-    --modality-config-path register_perception_modality.py \
+    --modality-config-path "${MODALITY_CONFIG_PATH}" \
+    --heatmap-labels-dir "${HEATMAP_LABELS_DIR}" \
     --output-dir "${OUTPUT_DIR}" \
     --save-total-limit 5 \
     --save-steps "${SAVE_STEPS}" \

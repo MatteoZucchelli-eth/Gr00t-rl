@@ -49,13 +49,19 @@ if [ ! -d "$DATASET_DIR" ] || [ -z "$(ls -A "$DATASET_DIR" 2>/dev/null)" ]; then
     echo "        Ensure the dataset is bind-mounted into the container at $DATASET_DIR."
     exit 1
 fi
-if [ ! -d "$DATASET_DIR/heatmap_labels" ]; then
-    echo "[ERROR] $DATASET_DIR/heatmap_labels not found."
+if [ "${PERCEPTION_CAMERA:-wrist}" = head ]; then
+    HEATMAP_LABELS_DIR="${HEATMAP_LABELS_DIR:-heatmap_labels_head}"
+else
+    HEATMAP_LABELS_DIR="${HEATMAP_LABELS_DIR:-heatmap_labels}"
+fi
+export HEATMAP_LABELS_DIR
+if [ ! -d "$DATASET_DIR/$HEATMAP_LABELS_DIR" ]; then
+    echo "[ERROR] $DATASET_DIR/$HEATMAP_LABELS_DIR not found."
     echo "        The perception finetune needs the heatmap label sidecar; rsync the"
     echo "        dataset INCLUDING heatmap_labels/ (see submit_perception_euler.sh header)."
     exit 1
 fi
-N_LABELS=$(find "$DATASET_DIR/heatmap_labels" -name 'episode_*.parquet' | wc -l)
+N_LABELS=$(find "$DATASET_DIR/$HEATMAP_LABELS_DIR" -name 'episode_*.parquet' | wc -l)
 echo "[setup] Dataset found at $DATASET_DIR (${N_LABELS} heatmap label files)"
 
 # --- 4. Launch training ---

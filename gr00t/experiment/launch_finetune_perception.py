@@ -135,5 +135,6 @@ if __name__ == "__main__":
     # Train on every sidecar frame. Out-of-view/occluded rows supervise visibility;
     # localization, depth, and normal losses are masked to visible rows.
     config.data.perception_labels_only = True
+    config.data.heatmap_labels_dir = ft_config.heatmap_labels_dir
 
     run(config)

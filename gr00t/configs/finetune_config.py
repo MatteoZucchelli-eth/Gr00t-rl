@@ -372,14 +372,16 @@ class PerceptionFinetuneConfig:
     than a silent fall-back to the raw foundation weights."""
 
     dataset_path: str = "./g1_dataset"
-    """Path to the dataset root (must contain the heatmap_labels/ sidecar directory)."""
+    """Path to the dataset root (must contain the selected heatmap label sidecar)."""
+
+    heatmap_labels_dir: str = "heatmap_labels"
+    """Sidecar directory: heatmap_labels for wrist, heatmap_labels_head for head."""
 
     embodiment_tag: str = "NEW_EMBODIMENT"
     """Embodiment tag (name or value, case-insensitive)."""
 
     modality_config_path: str | None = None
-    """Path to a Python file registering the WRIST-ONLY modality config
-    (see register_perception_modality.py)."""
+    """Path to a Python file registering a single-camera perception modality config."""
 
     # --- Model Tuning Flags ---
     tune_llm: bool = False
