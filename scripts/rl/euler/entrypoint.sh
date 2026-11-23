@@ -45,8 +45,10 @@ fi
 export PYTHONUNBUFFERED=1
 # Euler mounts $HOME read-only inside jobs; give every tool that defaults to ~ (tests'
 # ~/.cache/g00t, wandb, triton, matplotlib, ...) a writable home on scratch.
-if [ -d /groot ] && ! ( mkdir -p "$HOME/.cache" && touch "$HOME/.cache/.rw_test" ) 2>/dev/null; then
-    export HOME=/groot/home
+# GROOT_HOME (from .env, = /groot, the scratch bind) is the writable root, as in submit_euler.sh.
+GROOT_HOME="${GROOT_HOME:-/groot}"
+if [ -d "$GROOT_HOME" ] && ! ( mkdir -p "$HOME/.cache" && touch "$HOME/.cache/.rw_test" ) 2>/dev/null; then
+    export HOME="$GROOT_HOME/home"
     mkdir -p "$HOME"
     echo "[rl] \$HOME is read-only here; using HOME=$HOME"
 fi
