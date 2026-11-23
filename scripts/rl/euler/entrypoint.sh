@@ -43,6 +43,14 @@ if [ -d /.singularity.d/libs ]; then
     export LD_LIBRARY_PATH="$GLVND_DIR:${LD_LIBRARY_PATH:-}"
 fi
 export PYTHONUNBUFFERED=1
+# Euler mounts $HOME read-only inside jobs; give every tool that defaults to ~ (tests'
+# ~/.cache/g00t, wandb, triton, matplotlib, ...) a writable home on scratch.
+if [ -d /groot ] && ! ( mkdir -p "$HOME/.cache" && touch "$HOME/.cache/.rw_test" ) 2>/dev/null; then
+    export HOME=/groot/home
+    mkdir -p "$HOME"
+    echo "[rl] \$HOME is read-only here; using HOME=$HOME"
+fi
+export TEST_CACHE_PATH="${TEST_CACHE_PATH:-${XDG_CACHE_HOME:-$HOME/.cache}/g00t_tests}"
 # multiprocessing (DataLoader workers) puts Unix sockets under $TMPDIR; Linux caps socket
 # paths at 107 bytes, so fall back to /tmp when the inherited host path is long.
 if [ "${#TMPDIR}" -gt 60 ]; then export TMPDIR=/tmp; fi
