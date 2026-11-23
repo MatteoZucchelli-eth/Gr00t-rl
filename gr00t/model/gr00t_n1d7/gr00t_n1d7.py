@@ -862,6 +862,86 @@ class Gr00tN1d7ActionHead(nn.Module):
 
         return BatchFeature(data={"backbone_features": vl_embeds, "state_features": state_features})
 
+    def build_denoising_condition(
+        self,
+        vl_embeds: torch.Tensor,
+        state_features: torch.Tensor,
+        backbone_output: BatchFeature,
+        extra_cond_tokens: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """State-stream conditioning tokens for the denoising DiT.
+
+        Returns ``(sa_state_features, tip_target_pred)``. The tip-target head predicts
+        once and the DiT is conditioned on the (raw, scaled) prediction, matching the
+        teacher-forced training scheme. Token order matches training:
+        state, [tip target], [extra_cond_tokens].
+        """
+        sa_state_features = state_features
+        tip_target_pred = None
+        if self.use_tip_target_head:
+            attn_mask = backbone_output.get("backbone_attention_mask", None)
+            tip_pred_scaled = self.tip_target_head.predict_scaled(vl_embeds, attn_mask)
+            tip_target_pred = self.tip_target_head.unscale(tip_pred_scaled, orthonormalize=True)
+            tip_cond_token = self._tip_target_cond_token(tip_pred_scaled)
+            if tip_cond_token is not None:
+                sa_state_features = torch.cat((sa_state_features, tip_cond_token), dim=1)
+
+        if extra_cond_tokens is not None:
+            sa_state_features = torch.cat(
+                (sa_state_features, extra_cond_tokens.to(sa_state_features.dtype)), dim=1
+            )
+        return sa_state_features, tip_target_pred
+
+    def predict_velocity(
+        self,
+        actions: torch.Tensor,
+        t_cont: float,
+        vl_embeds: torch.Tensor,
+        sa_state_features: torch.Tensor,
+        embodiment_id: torch.Tensor,
+        backbone_output: BatchFeature,
+    ) -> torch.Tensor:
+        """Flow velocity at noisy actions ``actions`` [B, H, D] and flow time ``t_cont``.
+
+        ``t_cont`` runs from 0 (pure noise) to 1 (data). This is one step of the
+        inference loop in ``get_action_with_features``, factored out so RL code
+        (SDE sampling, denoising-step likelihoods) evaluates the exact same network
+        call, with or without gradients.
+        """
+        batch_size = actions.shape[0]
+        device = actions.device
+        t_discretized = int(t_cont * self.num_timestep_buckets)
+
+        # Embed noised action trajectory.
+        timesteps_tensor = torch.full(size=(batch_size,), fill_value=t_discretized, device=device)
+        action_features = self.action_encoder(actions, timesteps_tensor, embodiment_id)
+        # Add position embedding.
+        if self.config.add_pos_embed:
+            pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
+            pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
+            action_features = action_features + pos_embs
+
+        # Join vision, language, state and action embedding along sequence dimension.
+        sa_embs = torch.cat((sa_state_features, action_features), dim=1)
+
+        # Run model forward.
+        if self.config.use_alternate_vl_dit:
+            model_output = self.model(
+                hidden_states=sa_embs,
+                encoder_hidden_states=vl_embeds,
+                timestep=timesteps_tensor,
+                image_mask=backbone_output.image_mask,
+                backbone_attention_mask=backbone_output.backbone_attention_mask,
+            )
+        else:
+            model_output = self.model(
+                hidden_states=sa_embs,
+                encoder_hidden_states=vl_embeds,
+                timestep=timesteps_tensor,
+            )
+        pred = self.action_decoder(model_output, embodiment_id)
+        return pred[:, -self.action_horizon :]
+
     @torch.no_grad()
     def get_action_with_features(
         self,
@@ -937,61 +1017,16 @@ class Gr00tN1d7ActionHead(nn.Module):
                 :,
             ] = ramp[None, :, None].to(device)
 
-        # Tip-target head: predict once and condition on the (raw, scaled)
-        # prediction, matching the teacher-forced training scheme. Token order
-        # matches training: state, [tip target].
-        sa_state_features = state_features
-        tip_target_pred = None
-        if self.use_tip_target_head:
-            attn_mask = backbone_output.get("backbone_attention_mask", None)
-            tip_pred_scaled = self.tip_target_head.predict_scaled(vl_embeds, attn_mask)
-            tip_target_pred = self.tip_target_head.unscale(tip_pred_scaled, orthonormalize=True)
-            tip_cond_token = self._tip_target_cond_token(tip_pred_scaled)
-            if tip_cond_token is not None:
-                sa_state_features = torch.cat((sa_state_features, tip_cond_token), dim=1)
-
-        if extra_cond_tokens is not None:
-            sa_state_features = torch.cat(
-                (sa_state_features, extra_cond_tokens.to(sa_state_features.dtype)), dim=1
-            )
+        sa_state_features, tip_target_pred = self.build_denoising_condition(
+            vl_embeds, state_features, backbone_output, extra_cond_tokens
+        )
 
         # Run denoising steps.
         for t in range(self.num_inference_timesteps):
             t_cont = t / float(self.num_inference_timesteps)  # e.g. goes 0, 1/N, 2/N, ...
-            t_discretized = int(t_cont * self.num_timestep_buckets)
-
-            # Embed noised action trajectory.
-            timesteps_tensor = torch.full(
-                size=(batch_size,), fill_value=t_discretized, device=device
+            pred_velocity = self.predict_velocity(
+                actions, t_cont, vl_embeds, sa_state_features, embodiment_id, backbone_output
             )
-            action_features = self.action_encoder(actions, timesteps_tensor, embodiment_id)
-            # Add position embedding.
-            if self.config.add_pos_embed:
-                pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
-                pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
-                action_features = action_features + pos_embs
-
-            # Join vision, language, state and action embedding along sequence dimension.
-            sa_embs = torch.cat((sa_state_features, action_features), dim=1)
-
-            # Run model forward.
-            if self.config.use_alternate_vl_dit:
-                model_output = self.model(
-                    hidden_states=sa_embs,
-                    encoder_hidden_states=vl_embeds,
-                    timestep=timesteps_tensor,
-                    image_mask=backbone_output.image_mask,
-                    backbone_attention_mask=backbone_output.backbone_attention_mask,
-                )
-            else:
-                model_output = self.model(
-                    hidden_states=sa_embs,
-                    encoder_hidden_states=vl_embeds,
-                    timestep=timesteps_tensor,
-                )
-            pred = self.action_decoder(model_output, embodiment_id)
-
-            pred_velocity = pred[:, -self.action_horizon :]
 
             # Update actions using euler integration.
             actions = actions + dt * pred_velocity * vel_strength

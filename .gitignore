@@ -184,3 +184,6 @@ vla_eval_results
 # Kept on disk, out of the repo.
 scratchpad/
 hand_image_raw.png
+
+# RL sim deps: Korniak et al. MolmoSpaces fork, cloned by setup_molmospaces.sh.
+external_dependencies/generalist-improvement/
