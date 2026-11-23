@@ -15,13 +15,15 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-EULER_HOST="${EULER_HOST:-euler}"
 EULER_USER="${EULER_USER:-$USER}"
 EULER_PROJECT_DIR="${EULER_PROJECT_DIR:-groot-rl}"
 MLSPACES_LOCAL="${MLSPACES_LOCAL:-$HOME/mlspaces}"
 
+# shellcheck source=_ssh.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_ssh.sh"
 cd "$REPO_ROOT"
-rsync -avP --delete \
+euler_connect
+euler_rsync -avP --delete \
     --exclude='.git' --exclude='__pycache__' --exclude='*.egg-info' \
     --exclude='.venv' --exclude='venv' --exclude='*_uv/' \
     --exclude='checkpoints*' --exclude='g1_dataset*' --exclude='*_dataset*/' \
@@ -29,12 +31,14 @@ rsync -avP --delete \
     --exclude='wandb' --exclude='scratchpad' --exclude='outputs' --exclude='vla_eval_results' \
     --exclude='*.gz' --exclude='*.sif' --exclude='*.tar' \
     --exclude='.env' --exclude='logs' \
+    --exclude='.ruff_cache' --exclude='.pytest_cache' --exclude='.mypy_cache' \
+    --exclude='scripts/deployment/*/wheels' \
     . "$EULER_HOST:$EULER_PROJECT_DIR/"
 echo "[sync] code -> $EULER_HOST:$EULER_PROJECT_DIR (.env is NOT synced; create it there once)"
 
 if [ "${1:-}" = "--assets" ]; then
     [ -d "$MLSPACES_LOCAL" ] || { echo "no assets at $MLSPACES_LOCAL" >&2; exit 1; }
-    ssh "$EULER_HOST" "mkdir -p /cluster/work/mrl/$EULER_USER/mlspaces"
-    rsync -aP "$MLSPACES_LOCAL/" "$EULER_HOST:/cluster/work/mrl/$EULER_USER/mlspaces/"
+    euler_ssh "mkdir -p /cluster/work/mrl/$EULER_USER/mlspaces"
+    euler_rsync -aP "$MLSPACES_LOCAL/" "$EULER_HOST:/cluster/work/mrl/$EULER_USER/mlspaces/"
     echo "[sync] assets -> /cluster/work/mrl/$EULER_USER/mlspaces"
 fi

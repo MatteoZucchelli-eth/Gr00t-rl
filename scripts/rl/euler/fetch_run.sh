@@ -17,14 +17,16 @@ DEST="${2:-./rl_results/$RUN}"
 POLICY=0
 for a in "$@"; do [ "$a" = "--policy" ] && POLICY=1; done
 [ "$DEST" = "--policy" ] && DEST="./rl_results/$RUN"
-EULER_HOST="${EULER_HOST:-euler}"
 EULER_USER="${EULER_USER:-$USER}"
 SRC="/cluster/project/mrl/$EULER_USER/results/groot-rl/$RUN"
 
 mkdir -p "$DEST"
 EXCLUDES=()
 [ "$POLICY" -eq 1 ] || EXCLUDES=(--exclude='final_policy')
-rsync -avP "${EXCLUDES[@]}" "$EULER_HOST:$SRC/" "$DEST/"
+# shellcheck source=_ssh.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_ssh.sh"
+euler_connect
+euler_rsync -avP "${EXCLUDES[@]}" "$EULER_HOST:$SRC/" "$DEST/"
 echo "[fetch] $RUN -> $DEST"
 for f in final_eval.json eval.json; do
     if [ -f "$DEST/$f" ]; then

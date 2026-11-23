@@ -16,7 +16,6 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-EULER_HOST="${EULER_HOST:-euler}"
 EULER_USER="${EULER_USER:-$USER}"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT}"
 TARBALL="$OUT_DIR/groot-rl.tar.gz"
@@ -48,6 +47,9 @@ if [ "$BUILD" -eq 1 ]; then
 fi
 
 if [ "$UPLOAD" -eq 1 ]; then
-    ssh "$EULER_HOST" "mkdir -p /cluster/work/mrl/$EULER_USER/containers"
-    rsync -avP "$TARBALL" "$EULER_HOST:/cluster/work/mrl/$EULER_USER/containers/"
+    # shellcheck source=_ssh.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/_ssh.sh"
+    euler_connect
+    euler_ssh "mkdir -p /cluster/work/mrl/$EULER_USER/containers"
+    euler_rsync -avP "$TARBALL" "$EULER_HOST:/cluster/work/mrl/$EULER_USER/containers/"
 fi
