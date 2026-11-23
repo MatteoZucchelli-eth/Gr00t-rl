@@ -11,14 +11,15 @@
 #
 # Run from inside the gr00t container (so the venv's interpreter path is valid there):
 #   bash gr00t/eval/sim/MolmoSpaces/setup_molmospaces.sh
-# Env vars: MLSPACES_ASSETS_DIR / MLSPACES_CACHE_DIR (asset download locations),
+# Env vars: VENV_DIR / REF_DIR (venv and fork locations; docker/Dockerfile.rl sets them),
+#           MLSPACES_ASSETS_DIR / MLSPACES_CACHE_DIR (asset download locations),
 #           PYTHON (interpreter for the venv, default /usr/bin/python3.10).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_REPO="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-VENV_DIR="$SCRIPT_DIR/molmospaces_uv/.venv"
-REF_DIR="$PROJECT_REPO/external_dependencies/generalist-improvement"
+PROJECT_REPO="${PROJECT_REPO:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+VENV_DIR="${VENV_DIR:-$SCRIPT_DIR/molmospaces_uv/.venv}"
+REF_DIR="${REF_DIR:-$PROJECT_REPO/external_dependencies/generalist-improvement}"
 REF_URL="https://github.com/lasgroup/generalist-improvement.git"
 REF_SHA="b2886525ccab025bc5f3a5a06fa262e702b5b0f6"
 PYTHON="${PYTHON:-/usr/bin/python3.10}"
@@ -47,7 +48,10 @@ uv pip install --python "$VENV_DIR/bin/python" -e "$PROJECT_REPO" --no-deps
 import os
 os.environ.setdefault("MUJOCO_GL", "egl")
 import mujoco, molmo_spaces
-from gr00t.rl.envs.molmospaces import tcp_pose_to_eef_9d  # noqa: F401
+try:
+    from gr00t.rl.envs.molmospaces import tcp_pose_to_eef_9d  # noqa: F401
+except ImportError as e:  # e.g. Docker build before the RL sources are copied in
+    print("note: gr00t.rl.envs not importable yet:", e)
 print("mujoco", mujoco.__version__, "| molmo_spaces at", os.path.dirname(molmo_spaces.__file__))
 PY
 echo "MolmoSpaces venv ready: $VENV_DIR/bin/python"

@@ -34,3 +34,7 @@ gr00t_n1d7_engines/
 *.gz
 *.tar
 *.sif
+# Simulator venvs built in the source tree (gr00t/eval/sim/*/..._uv) — never bake into images.
+**/.venv*/
+**/*_uv/
+scratchpad/

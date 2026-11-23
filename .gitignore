@@ -187,3 +187,7 @@ hand_image_raw.png
 
 # RL sim deps: Korniak et al. MolmoSpaces fork, cloned by setup_molmospaces.sh.
 external_dependencies/generalist-improvement/
+
+# RL: packaged container and fetched Euler results
+groot-rl.sif
+rl_results/

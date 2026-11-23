@@ -1,0 +1,6 @@
+# Pilot candidates (task id specs; ranges a:b are expanded). 40 episodes per base task
+# in procthor-10k. Widen / narrow after looking at list_tasks output.
+pick/0:40
+pnp/0:40
+open/0:40
+close/0:40

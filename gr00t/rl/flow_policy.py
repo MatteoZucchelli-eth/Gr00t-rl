@@ -178,6 +178,10 @@ class FlowPolicy:
         import gr00t.model  # noqa: F401  (registers the model classes)
 
         model_dir = Path(model_path)
+        if not model_dir.is_dir():  # Hugging Face repo id, e.g. nvidia/GR00T-N1.7-3B
+            from huggingface_hub import snapshot_download
+
+            model_dir = Path(snapshot_download(str(model_path)))
         model = AutoModel.from_pretrained(model_dir)
         model.to(device=device, dtype=torch.bfloat16)
         processor_dir = (

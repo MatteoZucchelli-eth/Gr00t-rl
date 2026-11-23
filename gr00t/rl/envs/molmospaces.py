@@ -39,10 +39,34 @@ import numpy as np
 # OXE DROID training pipeline (examples/DROID/main_gr00t.py).
 DROID_EEF_ROTATION_CORRECT = [[0, 0, -1], [-1, 0, 0], [0, 1, 0]]
 GRIPPER_QPOS_OPEN_TO_CLOSED = 0.824033
-DEFAULT_BENCHMARK_SUBPATH = (
-    "benchmarks/molmospaces-bench-v1/procthor-10k/FrankaPickDroidMiniBench/"
-    "FrankaPickDroidMiniBench_json_benchmark_20251231"
-)
+BENCHMARK_ROOT_SUBPATH = "benchmarks/molmospaces-bench-v1"
+# Short names usable in task ids ("open/12"). Any other "<scene-set>/<Benchmark>" path
+# relative to BENCHMARK_ROOT_SUBPATH (or an absolute directory) works too, e.g.
+# "ithor/FrankaOpenHardBench/3".
+BUILTIN_BENCHMARKS = {
+    "pick": "procthor-10k/FrankaPickDroidMiniBench",  # Korniak et al.'s pick suite
+    "pnp": "procthor-10k/FrankaPickandPlaceDroidMiniBench",
+    "pick_hard": "procthor-10k/FrankaPickHardBench",
+    "pnp_hard": "procthor-10k/FrankaPickandPlaceHardBench",
+    "open": "procthor-10k/FrankaOpenHardBench",
+    "close": "procthor-10k/FrankaCloseHardBench",
+}
+
+
+def resolve_benchmark_dir(spec: str, assets_dir: Path) -> Path:
+    """Benchmark spec -> directory holding ``benchmark.json``.
+
+    Relative specs are resolved under ``<assets>/benchmarks/molmospaces-bench-v1``; a
+    directory that only wraps one dated ``*json_benchmark*`` folder is descended into.
+    """
+    p = Path(spec).expanduser()
+    if not p.is_absolute():
+        p = Path(assets_dir) / BENCHMARK_ROOT_SUBPATH / p
+    if p.is_dir() and not (p / "benchmark.json").exists() and not any(p.glob("house_*")):
+        subs = sorted(d for d in p.iterdir() if d.is_dir() and "json_benchmark" in d.name)
+        if len(subs) == 1:
+            p = subs[0]
+    return p
 
 
 @contextmanager
@@ -144,13 +168,14 @@ class MolmoSpacesAdapter:
             from molmo_spaces.molmo_spaces_constants import ASSETS_DIR
 
         self._load_all_episodes = load_all_episodes
-        if not benchmarks:
-            default_dir = os.environ.get(
-                "MLSPACES_BENCHMARK_DIR", str(Path(ASSETS_DIR) / DEFAULT_BENCHMARK_SUBPATH)
-            )
-            benchmarks = {"pick": default_dir}
-        self.benchmark_dirs = {k: Path(v).expanduser().resolve() for k, v in benchmarks.items()}
-        self.default_benchmark = default_benchmark or next(iter(self.benchmark_dirs))
+        self._assets_dir = Path(ASSETS_DIR)
+        specs = dict(BUILTIN_BENCHMARKS)
+        if os.environ.get("MLSPACES_BENCHMARK_DIR"):  # Korniak's override of the default
+            specs["pick"] = os.environ["MLSPACES_BENCHMARK_DIR"]
+        specs.update(benchmarks or {})
+        self.benchmark_specs = specs
+        self.benchmark_dirs: dict[str, Path] = {}  # resolved lazily
+        self.default_benchmark = default_benchmark or "pick"
         self._episodes: dict[str, list] = {}
         self.render_device = render_device
         self.image_size = tuple(image_size)
@@ -183,15 +208,28 @@ class MolmoSpacesAdapter:
             "camera_keys": ["exterior_image_1_left", "wrist_image_left"],
             "state_keys": ["eef_9d", "gripper_position", "joint_position"],
             "image_size": list(self.image_size),
-            "benchmarks": {k: str(v) for k, v in self.benchmark_dirs.items()},
+            "benchmarks": dict(self.benchmark_specs),
         }
+
+    def benchmark_dir(self, benchmark: str) -> Path:
+        if benchmark not in self.benchmark_dirs:
+            spec = self.benchmark_specs.get(benchmark, benchmark)
+            path = resolve_benchmark_dir(spec, self._assets_dir)
+            if not path.is_dir():
+                raise KeyError(
+                    f"Benchmark {benchmark!r} -> {path} does not exist; "
+                    f"short names: {sorted(self.benchmark_specs)}"
+                )
+            self.benchmark_dirs[benchmark] = path
+        return self.benchmark_dirs[benchmark]
 
     def episodes(self, benchmark: str) -> list:
         if benchmark not in self._episodes:
+            path = self.benchmark_dir(benchmark)
             with _quiet():
-                eps = self._load_all_episodes(self.benchmark_dirs[benchmark])
+                eps = self._load_all_episodes(path)
             if not eps:
-                raise ValueError(f"No benchmark episodes found in {self.benchmark_dirs[benchmark]}")
+                raise ValueError(f"No benchmark episodes found in {path}")
             self._episodes[benchmark] = eps
         return self._episodes[benchmark]
 
@@ -203,8 +241,7 @@ class MolmoSpacesAdapter:
             bench, idx = self.default_benchmark, task_id.split("_")[-1]
         else:
             bench, idx = self.default_benchmark, task_id
-        if bench not in self.benchmark_dirs:
-            raise KeyError(f"Unknown benchmark {bench!r}; known: {sorted(self.benchmark_dirs)}")
+        self.benchmark_dir(bench)  # validates
         return bench, int(idx)
 
     # ------------------------------------------------------------------ episodes

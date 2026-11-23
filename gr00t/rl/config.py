@@ -16,8 +16,9 @@ class EnvConfig:
 
     backend: Literal["molmospaces", "libero", "fake"] = "molmospaces"
     """Environment adapter run by every worker."""
-    python: str = "python"
-    """Interpreter of the simulator venv used to launch workers (ignored if spawn=False)."""
+    python: str = ""
+    """Interpreter of the simulator venv for workers; empty = auto ($RL_MOLMOSPACES_PYTHON /
+    $RL_LIBERO_PYTHON in the RL image, else the venv built by the setup script)."""
     num_envs: int = 8
     """Number of parallel environment workers."""
     host: str = "127.0.0.1"
@@ -144,6 +145,8 @@ class TrainConfig:
     frame_quality: int = 95
     num_workers: int = 8
     """CPU workers that decode frames and run the processor for training batches."""
+    loader_timeout_s: float = 1800.0
+    """Fail (instead of hang) if a training batch takes longer than this to prepare."""
     prefix_batch: int = 64
     """Batch size when computing missing prefix embeddings after a collection round."""
     encode_chunk: int = 64
@@ -165,3 +168,27 @@ class TrainConfig:
     collect: CollectConfig = field(default_factory=CollectConfig)
     critic: CriticConfig = field(default_factory=CriticConfig)
     actor: ActorConfig = field(default_factory=ActorConfig)
+
+
+def expand_task_specs(specs: list[str]) -> list[str]:
+    """Expand task specs: ``"open/0:50"`` -> ``open/0 .. open/49``; ``"@file.txt"`` -> one
+    spec per non-empty, non-comment line of the file (recursively expanded).
+    Order is preserved and duplicates are dropped."""
+    from pathlib import Path
+
+    out: list[str] = []
+    for spec in specs:
+        spec = spec.strip()
+        if not spec or spec.startswith("#"):
+            continue
+        if spec.startswith("@"):
+            lines = Path(spec[1:]).read_text().splitlines()
+            out.extend(expand_task_specs([ln.split("#", 1)[0] for ln in lines]))
+            continue
+        prefix, _, last = spec.rpartition("/")
+        if ":" in last:
+            lo, hi = (int(x) for x in last.split(":"))
+            out.extend(f"{prefix}/{i}" if prefix else str(i) for i in range(lo, hi))
+        else:
+            out.append(spec)
+    return list(dict.fromkeys(out))

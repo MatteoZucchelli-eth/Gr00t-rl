@@ -36,7 +36,7 @@ import numpy as np
 import torch
 import tyro
 
-from gr00t.rl.config import TrainConfig
+from gr00t.rl.config import TrainConfig, expand_task_specs
 from gr00t.rl.envs.client import RemoteVectorEnv
 from gr00t.rl.flow_policy import FlowPolicy, prepare_inputs
 from gr00t.rl.ogpo import CriticBatch, OGPOLearner
@@ -115,6 +115,8 @@ def _identity_collate(x):
 
 class Trainer:
     def __init__(self, cfg: TrainConfig):
+        cfg.collect.tasks = expand_task_specs(cfg.collect.tasks)
+        cfg.collect.eval_tasks = expand_task_specs(cfg.collect.eval_tasks)
         self.cfg = cfg
         self.out = Path(cfg.output_dir)
         self.out.mkdir(parents=True, exist_ok=True)
@@ -340,6 +342,8 @@ class Trainer:
             collate_fn=_identity_collate,
             prefetch_factor=2 if cfg.num_workers > 0 else None,
             multiprocessing_context="fork" if cfg.num_workers > 0 else None,
+            # A crashed worker must fail the job instead of hanging it until the time limit.
+            timeout=cfg.loader_timeout_s if cfg.num_workers > 0 else 0,
         )
         t0 = time.time()
         for i, item in enumerate(loader):

@@ -16,6 +16,39 @@ from typing import Any, Sequence
 from gr00t.rl.envs.protocol import pack, unpack
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_SIM_PYTHON = {
+    "molmospaces": (
+        "RL_MOLMOSPACES_PYTHON",
+        "gr00t/eval/sim/MolmoSpaces/molmospaces_uv/.venv/bin/python",
+    ),
+    "libero": ("RL_LIBERO_PYTHON", "gr00t/eval/sim/LIBERO/libero_uv/.venv/bin/python"),
+}
+
+
+def resolve_sim_python(backend: str, python: str = "") -> str:
+    """Interpreter for env workers: explicit ``python`` if given, else the backend's venv
+    (``$RL_MOLMOSPACES_PYTHON`` / ``$RL_LIBERO_PYTHON``, set in the RL container image),
+    else the venv built in the source tree by the setup scripts. ``fake`` uses the
+    current interpreter."""
+    import sys
+
+    if python:
+        return python
+    if backend not in _SIM_PYTHON:
+        return sys.executable
+    env_var, rel = _SIM_PYTHON[backend]
+    if os.environ.get(env_var):
+        return os.environ[env_var]
+    candidate = _REPO_ROOT / rel
+    if candidate.exists():
+        return str(candidate)
+    raise FileNotFoundError(
+        f"No interpreter for backend {backend!r}: set --env.python or ${env_var}, or build "
+        f"the venv with the setup script (expected {candidate})"
+    )
+
+
 class EnvWorkerError(RuntimeError):
     """One or more workers failed. ``failed`` maps index -> message; ``replies`` holds the
     successful replies of the same request batch."""
@@ -40,7 +73,7 @@ class RemoteVectorEnv:
         host: str = "127.0.0.1",
         base_port: int = 6100,
         spawn: bool = True,
-        python: str = "python",
+        python: str = "",
         render_devices: Sequence[int] = (0,),
         backend_kwargs: dict | None = None,
         max_episode_steps: int = 450,
@@ -56,7 +89,7 @@ class RemoteVectorEnv:
         self.host = host
         self.base_port = base_port
         self.spawn = spawn
-        self.python = python
+        self.python = resolve_sim_python(backend, python)
         self.render_devices = list(render_devices)
         self.backend_kwargs = backend_kwargs or {}
         self.max_episode_steps = max_episode_steps

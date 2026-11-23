@@ -24,7 +24,7 @@ from pathlib import Path
 import torch
 import tyro
 
-from gr00t.rl.config import EnvConfig
+from gr00t.rl.config import EnvConfig, expand_task_specs
 from gr00t.rl.envs.client import RemoteVectorEnv
 from gr00t.rl.flow_policy import FlowPolicy
 from gr00t.rl.rollout import Collector
@@ -49,6 +49,7 @@ class EvalConfig:
 
 def main(cfg: EvalConfig) -> dict:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    cfg.tasks = expand_task_specs(cfg.tasks)
     if not cfg.tasks:
         raise ValueError("--tasks is empty")
     out = Path(cfg.output_dir)

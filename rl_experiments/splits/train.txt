@@ -1,0 +1,2 @@
+# TODO (PLAN.md §5): 5 training families, ~10 tasks each, fixed after the pilot.
+# Example syntax:  pick/0:10   open/100:110

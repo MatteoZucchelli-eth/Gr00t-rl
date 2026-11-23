@@ -4,7 +4,8 @@ Code for the GR00T RL → demo-efficiency transfer experiment
 (design: `~/experiments/groot-rl-transfer/PLAN.md`). It covers PLAN milestones
 **M1** (MolmoSpaces ↔ GR00T-DROID env wrapper) and **M3** (SDE sampling + per-step
 log-probs, BroNet critic, OGPO update, Best-of-N collection, batch-online loop).
-Euler packaging (M5) and the actual runs are not done yet.
+Euler packaging (M5): `submit_rl_euler.sh` + presets in `rl_experiments/`; see
+[`scripts/rl/euler/README.md`](../../scripts/rl/euler/README.md). The actual runs are not done yet.
 
 ## Layout
 
@@ -76,9 +77,11 @@ python -m gr00t.rl.train --model-path <B checkpoint> --output-dir outputs/arm_c 
 python -m gr00t.rl.train --algo bon --critic.bootstrap sarsa --collect.eval-best-of-n 32 ...
 ```
 
-Task ids: MolmoSpaces `"<benchmark>/<episode>"` (benchmark names map to directories via
-`--env.backend-kwargs-json '{"benchmarks": {"pick": "...", "open": "..."}}'`, default
-`pick` = `FrankaPickDroidMiniBench`), LIBERO `"libero_10/3"`.
+Task ids: MolmoSpaces `"<benchmark>/<episode>"` with short names `pick`, `pnp` (Droid mini
+benches), `pick_hard`, `pnp_hard`, `open`, `close` (procthor-10k hard benches) or any
+`<scene-set>/<Benchmark>` path (`ithor/FrankaOpenHardBench/3`); LIBERO `"libero_10/3"`.
+Lists accept ranges and files: `open/0:40`, `@rl_experiments/splits/train.txt`.
+`--env.python` is optional (auto: `$RL_*_PYTHON` in the RL image, else the source-tree venv).
 
 Outputs: `metrics.jsonl` (+ wandb with `--use-wandb`), `rounds/round_XXX/` (policy,
 learner state, replay buffer of the newest round), `final_policy/`: a normal GR00T
