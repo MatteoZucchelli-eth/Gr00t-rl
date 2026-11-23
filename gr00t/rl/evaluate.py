@@ -43,6 +43,11 @@ class EvalConfig:
     seed: int = 10_000_019
     """Default is disjoint from the training-collection seeds used by gr00t.rl.train."""
     output_dir: str = "outputs/eval"
+    use_wandb: bool = False
+    """Log the summary and a per-task table (the Euler entrypoint enables it with WANDB_API_KEY)."""
+    wandb_project: str = "groot-rl-transfer"
+    wandb_entity: str | None = None
+    run_name: str | None = None
     device: str = "cuda"
     env: EnvConfig = field(default_factory=EnvConfig)
 
@@ -91,6 +96,28 @@ def main(cfg: EvalConfig) -> dict:
         "worker_failures": stats.worker_failures,
     }
     (out / "eval.json").write_text(json.dumps(result, indent=2))
+    if cfg.use_wandb:
+        import dataclasses
+
+        import wandb
+
+        name = cfg.run_name or out.name
+        run = wandb.init(
+            project=cfg.wandb_project,
+            entity=cfg.wandb_entity,
+            name=name,
+            id=name.replace("/", "_"),
+            resume="allow",
+            job_type="eval",
+            config=dataclasses.asdict(cfg),
+            dir=str(out),
+        )
+        run.summary.update({k: v for k, v in result.items() if not isinstance(v, dict)})
+        table = wandb.Table(columns=["task", "success_rate"])
+        for t, sr in sorted(result["per_task"].items()):
+            table.add_data(t, sr)
+        run.log({"per_task": table})
+        run.finish()
     print(
         f"\nmean success {result['mean_success']:.3f} | tasks with >=1 success: "
         f"{result['tasks_with_any_success']}/{result['num_tasks']} | {stats.env_steps} env steps in {stats.wall_time_s:.0f}s"

@@ -7,6 +7,7 @@ MODEL_PATH=/groot/runs/REPLACE_WITH_B_RUN
 ARGS=(
     --model-path "$MODEL_PATH"
     --algo bon --seed 0 --critic.bootstrap sarsa --collect.eval-best-of-n 32
+    --wandb-group arm_e
     --steps-per-round 10000
     --collect.tasks @rl_experiments/splits/train.txt
     --collect.eval-tasks @rl_experiments/splits/train.txt @rl_experiments/splits/heldout.txt

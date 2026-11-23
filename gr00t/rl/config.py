@@ -154,8 +154,15 @@ class TrainConfig:
     log_every: int = 25
     device: str = "cuda"
     use_wandb: bool = False
+    """The Euler entrypoint turns this on when WANDB_API_KEY is set."""
     wandb_project: str = "groot-rl-transfer"
+    wandb_entity: str | None = None
+    """wandb team/user; None = the API key's default entity."""
+    wandb_group: str | None = None
+    """Group runs in the UI, e.g. by arm (seeds of one arm share a group)."""
     run_name: str | None = None
+    """Display name and wandb run id (resubmissions continue the same wandb run).
+    Defaults to the output directory's name."""
     resume: bool = True
     """Resume from the latest round checkpoint in output_dir if present."""
     save_buffer: bool = True

@@ -176,12 +176,16 @@ class Trainer:
         if cfg.use_wandb:
             import wandb
 
+            name = cfg.run_name or self.out.name
             self._wandb = wandb.init(
                 project=cfg.wandb_project,
-                name=cfg.run_name or self.out.name,
+                entity=cfg.wandb_entity,
+                group=cfg.wandb_group,
+                name=name,
                 config=dataclasses.asdict(cfg),
                 resume="allow",
-                id=(cfg.run_name or self.out.name).replace("/", "_"),
+                id=name.replace("/", "_"),
+                dir=str(self.out),
             )
         (self.out / "config.json").write_text(json.dumps(dataclasses.asdict(cfg), indent=2))
         self.env: RemoteVectorEnv | None = None
@@ -455,10 +459,14 @@ class Trainer:
             (self.out / "final_eval.json").write_text(
                 json.dumps(final.metrics("final_eval"), indent=2)
             )
+            if self._wandb is not None:
+                self._wandb.summary.update(final.metrics("final_eval"))
         finally:
             pool.shutdown(wait=False)
             if self.env is not None:
                 self.env.close()
+            if self._wandb is not None:
+                self._wandb.finish()
 
     def _kill_switch(self) -> bool:
         cfg = self.cfg

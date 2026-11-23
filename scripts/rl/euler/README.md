@@ -68,6 +68,17 @@ set `MODEL_PATH` in the arm presets to the warm-start checkpoint B: runs from
 `submit_euler.sh` live in `/cluster/scratch/$USER/groot/runs/<run>`, which the RL job sees
 as `/groot/runs/<run>`.
 
+## Weights & Biases
+
+On automatically when `~/groot-rl/.env` contains `WANDB_API_KEY` (opt out per job with
+`EXTRA_ENV="--env WANDB_MODE=disabled"`). Training runs log to project `groot-rl-transfer`
+with the preset's `RUN_NAME` as run name **and** run id, so the chained 24 h jobs of one run
+continue the same wandb run; arm presets set `--wandb-group` so seeds of an arm group together.
+The pilot/eval jobs log a summary and a per-task success table. The smoke job logs its fake
+run to project `groot-rl-smoke` (a quick check that compute nodes reach wandb). Override with
+`--wandb-project` / `--wandb-entity` in a preset's `ARGS`. Reusing a `RUN_NAME` for a fresh
+run (after deleting its run dir) appends to the old wandb run: pick a new name instead.
+
 ## Where things go
 
 | What | Path on Euler |

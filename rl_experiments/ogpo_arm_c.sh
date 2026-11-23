@@ -9,6 +9,7 @@ MODEL_PATH=/groot/runs/REPLACE_WITH_B_RUN
 ARGS=(
     --model-path "$MODEL_PATH"
     --algo ogpo --seed 0
+    --wandb-group arm_c
     --collect.tasks @rl_experiments/splits/train.txt
     --collect.eval-tasks @rl_experiments/splits/train.txt @rl_experiments/splits/heldout.txt
     --env.backend molmospaces --env.num-envs 24 --env.max-episode-steps 450

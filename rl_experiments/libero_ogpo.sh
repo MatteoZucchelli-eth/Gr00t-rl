@@ -9,6 +9,7 @@ ARGS=(
     --model-path "$MODEL_PATH"
     --embodiment-tag LIBERO_PANDA
     --algo ogpo --seed 0
+    --wandb-group libero_validation
     --collect.tasks libero_spatial/0:10
     --collect.execute-steps 8 --critic.horizon 16
     --env.backend libero --env.num-envs 20 --env.max-episode-steps 300

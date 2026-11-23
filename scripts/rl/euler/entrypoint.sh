@@ -50,6 +50,16 @@ RL_RUN_DIR="${RL_RUN_DIR:-/tmp/rl_run}"
 RL_RESULTS_DIR="${RL_RESULTS_DIR:-}"
 mkdir -p "$RL_RUN_DIR"
 PY=/workspace/.venv/bin/python
+RL_RUN_NAME="${RL_RUN_NAME:-$(basename "$RL_RUN_DIR")}"
+# wandb: on whenever .env provides WANDB_API_KEY (set WANDB_MODE=disabled to opt out).
+# The run id is RL_RUN_NAME, so chained jobs of one run continue the same wandb run.
+WANDB_ARGS=()
+if [ -n "${WANDB_API_KEY:-}" ] && [ "${WANDB_MODE:-}" != "disabled" ]; then
+    WANDB_ARGS=(--use-wandb)
+    echo "[rl] wandb enabled (run id: $RL_RUN_NAME)"
+else
+    echo "[rl] wandb disabled (no WANDB_API_KEY in .env, or WANDB_MODE=disabled)"
+fi
 SIM_PY="${RL_MOLMOSPACES_PYTHON:-gr00t/eval/sim/MolmoSpaces/molmospaces_uv/.venv/bin/python}"
 
 echo "[rl] mode=$MODE run_dir=$RL_RUN_DIR results=${RL_RESULTS_DIR:-<none>} host=$(hostname)"
@@ -90,6 +100,7 @@ smoke)
         --collect.tasks a b --collect.episodes-per-task 2 --collect.eval-episodes-per-task 1 \
         --collect.best-of-n 4 --critic.horizon 8 --critic.batch-size 16 --critic.num-vr 2 \
         --actor.batch-states 4 --actor.group-size 4 --actor.micro-batch 8 --actor.bc-batch 4 \
+        "${WANDB_ARGS[@]}" --wandb-project groot-rl-smoke --run-name "smoke_${SLURM_JOB_ID:-local}" \
         ${SMOKE_TRAINABLE_REGEX:+--actor.trainable-regex "$SMOKE_TRAINABLE_REGEX"}
     echo "[rl] 4/4 MolmoSpaces space check + 2-episode zero-shot eval"
     $SIM_PY -c "from molmo_spaces.molmo_spaces_constants import get_resource_manager; get_resource_manager()"
@@ -114,7 +125,7 @@ list_tasks)
     [ -n "$RL_RESULTS_DIR" ] && cp -r "$RL_RUN_DIR/task_lists" "$RL_RESULTS_DIR/" || true
     ;;
 eval)
-    $PY -m gr00t.rl.evaluate --output-dir "$RL_RUN_DIR" "$@"
+    $PY -m gr00t.rl.evaluate --output-dir "$RL_RUN_DIR" --run-name "$RL_RUN_NAME" "${WANDB_ARGS[@]}" "$@"
     publish
     ;;
 train)
@@ -123,7 +134,7 @@ train)
         publish
         exit 0
     fi
-    $PY -m gr00t.rl.train --output-dir "$RL_RUN_DIR" "$@"
+    $PY -m gr00t.rl.train --output-dir "$RL_RUN_DIR" --run-name "$RL_RUN_NAME" "${WANDB_ARGS[@]}" "$@"
     publish
     ;;
 *)

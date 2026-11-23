@@ -114,6 +114,7 @@ time apptainer exec --nv "${BINDS[@]}" \
     --env MLSPACES_CACHE_DIR=/mlspaces/cache \
     --env MLSPACES_AUTO_INSTALL=True \
     --env RL_RUN_DIR=/rl_run \
+    --env RL_RUN_NAME="$RUN_NAME" \
     --env RL_RESULTS_DIR=/results \
     --env WANDB_DIR=/rl_run \
     "$SIF" \
