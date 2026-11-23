@@ -43,7 +43,8 @@ scripts/rl/euler/submit.sh rl_experiments/libero_ogpo.sh      # M3 validation on
 `sbatch submit_rl_euler.sh rl_experiments/<preset>.sh` also works (single job).
 
 Default resources (`submit_rl_euler.sh` header): 1× A100 80 GB, 32 CPUs, 256 GB RAM,
-24 h, 150 GB `$TMPDIR`. Presets lower them via `SBATCH_ARGS`.
+24 h, 150 GB `$TMPDIR`. Presets lower them via `SBATCH_ARGS` (the smoke test uses an
+RTX 4090). GPU names: `a100_80gb`, `rtx_4090`, ... (aliases of `nvidia_a100_80gb_pcie`, ...).
 
 ## Presets
 
