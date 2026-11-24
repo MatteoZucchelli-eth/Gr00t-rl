@@ -4,5 +4,5 @@
 # Resetting a task renders the cameras (EGL), so it needs a GPU, but any small one will do.
 MODE=assets
 RUN_NAME=assets
-SBATCH_ARGS="--time=08:00:00 --cpus-per-task=4 --gpus=rtx_2080_ti:1 --tmp=60G"
+SBATCH_ARGS="--time=08:00:00 --cpus-per-task=4 --mem-per-cpu=12G --gpus=rtx_2080_ti:1 --tmp=60G"
 ARGS=(--tasks @rl_experiments/splits/pilot_candidates.txt)
