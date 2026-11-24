@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 import json
 import logging
 from pathlib import Path
+import time
 
 import torch
 import tyro
@@ -27,7 +28,7 @@ import tyro
 from gr00t.rl.config import EnvConfig, expand_task_specs
 from gr00t.rl.envs.client import RemoteVectorEnv
 from gr00t.rl.flow_policy import FlowPolicy
-from gr00t.rl.rollout import Collector
+from gr00t.rl.rollout import Collector, RolloutStats
 
 
 @dataclass
@@ -43,6 +44,8 @@ class EvalConfig:
     seed: int = 10_000_019
     """Default is disjoint from the training-collection seeds used by gr00t.rl.train."""
     output_dir: str = "outputs/eval"
+    partial_every: int = 25
+    """Write eval_partial.json (per-task counts so far) every n episodes."""
     use_wandb: bool = False
     """Log the summary and a per-task table (the Euler entrypoint enables it with WANDB_API_KEY)."""
     wandb_project: str = "groot-rl-transfer"
@@ -79,9 +82,72 @@ def main(cfg: EvalConfig) -> dict:
     )
     try:
         collector = Collector(env, policy, learner=None, execute_steps=cfg.execute_steps)
-        stats = collector.run(
-            cfg.tasks, cfg.episodes_per_task, mode=cfg.mode, best_of_n=1, buffer=None, seed=cfg.seed
+        total = len(cfg.tasks) * cfg.episodes_per_task
+        t_start = time.time()
+        partial_path = out / "eval_partial.json"
+        prev = RolloutStats()
+        if partial_path.exists():
+            d = json.loads(partial_path.read_text())
+            same = (
+                d.get("tasks") == cfg.tasks
+                and d.get("episodes_per_task") == cfg.episodes_per_task
+                and d.get("seed") == cfg.seed
+                and d.get("mode") == cfg.mode
+            )
+            if same:
+                prev = RolloutStats.from_dict(d["stats"])
+                logging.info(
+                    "resuming: %d/%d episodes already done (%s)",
+                    sum(prev.episodes.values()),
+                    total,
+                    partial_path,
+                )
+            else:
+                stale = partial_path.with_suffix(f".stale.{int(time.time())}.json")
+                partial_path.rename(stale)
+                logging.warning("eval_partial.json is from a different config; moved to %s", stale)
+
+        def save_partial(stats) -> None:
+            stats = prev.merged(stats)
+            n = sum(stats.episodes.values())
+            if n % cfg.partial_every and n != total:
+                return
+            stats.wall_time_s = prev.wall_time_s + (time.time() - t_start)
+            partial = {
+                "tasks": cfg.tasks,
+                "episodes_per_task": cfg.episodes_per_task,
+                "seed": cfg.seed,
+                "mode": cfg.mode,
+                "episodes_done": n,
+                "episodes_total": total,
+                "mean_success_so_far": stats.success_rate,
+                "stats": stats.to_dict(),
+            }
+            tmp = out / "eval_partial.json.tmp"
+            tmp.write_text(json.dumps(partial, indent=2))
+            tmp.replace(partial_path)
+            done_here = n - sum(prev.episodes.values())
+            rate = done_here / max(time.time() - t_start, 1e-6)
+            logging.info(
+                "eval progress: %d/%d episodes, success so far %.3f, %.2f episodes/min, ETA %.1f h",
+                n,
+                total,
+                stats.success_rate,
+                60 * rate,
+                (total - n) / max(rate, 1e-9) / 3600,
+            )
+
+        new_stats = collector.run(
+            cfg.tasks,
+            cfg.episodes_per_task,
+            mode=cfg.mode,
+            best_of_n=1,
+            buffer=None,
+            seed=cfg.seed,
+            on_episode=save_partial,
+            skip=dict(prev.episodes),
         )
+        stats = prev.merged(new_stats)
     finally:
         env.close()
     result = {

@@ -112,6 +112,7 @@ def test_collector_records_transitions(fake_envs, best_of_n):
     )
     buf = make_buffer(policy, H=2)
     col = Collector(fake_envs, policy, learner, execute_steps=3, critic_horizon=2, gamma=0.9)
+    seen = []
     stats = col.run(
         ["task_win", "task_lose"],
         episodes_per_task=3,
@@ -119,7 +120,9 @@ def test_collector_records_transitions(fake_envs, best_of_n):
         best_of_n=best_of_n,
         buffer=buf,
         seed=5,
+        on_episode=lambda st: seen.append(sum(st.episodes.values())),
     )
+    assert seen == list(range(1, 7))  # called once per finished episode
     assert stats.episodes == {"task_win": 3, "task_lose": 3}
     assert stats.per_task() == {"task_win": 1.0, "task_lose": 0.0}
     assert stats.success_lengths == [2, 2, 2]
@@ -136,3 +139,20 @@ def test_collector_records_transitions(fake_envs, best_of_n):
     obs = buf.policy_observations([0], policy.language_key)[0]
     assert obs["video"]["wrist_image_left"].shape == (2, 8, 12, 3)
     assert obs["language"][policy.language_key][0].startswith("fake task")
+
+
+def test_collector_skip_and_stats_merge(fake_envs):
+    """Resume support: skipped episodes are not rerun, and merged stats add up."""
+    from gr00t.rl.rollout import RolloutStats
+
+    policy = GripperPolicy(prefix_dim=4, horizon=4, action_dim=2)
+    col = Collector(fake_envs, policy, None, execute_steps=3, critic_horizon=2, gamma=0.9)
+    tasks = ["task_win", "task_lose"]
+    part1 = col.run(tasks, episodes_per_task=3, mode="ode", skip={"task_win": 3, "task_lose": 1})
+    assert part1.episodes == {"task_lose": 2}
+    part0 = col.run(tasks, episodes_per_task=3, mode="ode", skip={"task_lose": 2})
+    assert part0.episodes == {"task_win": 3, "task_lose": 1}
+    total = RolloutStats.from_dict(part0.to_dict()).merged(part1)
+    assert total.episodes == {"task_win": 3, "task_lose": 3}
+    assert total.per_task() == {"task_win": 1.0, "task_lose": 0.0}
+    assert total.env_steps == part0.env_steps + part1.env_steps

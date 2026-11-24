@@ -89,7 +89,7 @@ publish() {
     # Copy the small, final artifacts of a run to persistent storage.
     [ -n "$RL_RESULTS_DIR" ] || return 0
     mkdir -p "$RL_RESULTS_DIR"
-    for f in config.json metrics.jsonl final_eval.json eval.json; do
+    for f in config.json metrics.jsonl final_eval.json eval.json eval_partial.json; do
         [ -f "$RL_RUN_DIR/$f" ] && cp "$RL_RUN_DIR/$f" "$RL_RESULTS_DIR/"
     done
     if [ -d "$RL_RUN_DIR/final_policy" ]; then
@@ -140,6 +140,12 @@ list_tasks)
     [ -n "$RL_RESULTS_DIR" ] && cp -r "$RL_RUN_DIR/task_lists" "$RL_RESULTS_DIR/" || true
     ;;
 eval)
+    if [ -f "$RL_RUN_DIR/eval.json" ]; then
+        echo "[rl] $RL_RUN_DIR/eval.json exists: evaluation already finished, nothing to do."
+        publish
+        exit 0
+    fi
+    # Resumes from eval_partial.json if a previous job hit its time limit.
     $PY -m gr00t.rl.evaluate --output-dir "$RL_RUN_DIR" --run-name "$RL_RUN_NAME" "${WANDB_ARGS[@]}" "$@"
     publish
     ;;

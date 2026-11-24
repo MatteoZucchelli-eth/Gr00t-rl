@@ -44,6 +44,39 @@ class RolloutStats:
     worker_failures: int = 0
     wall_time_s: float = 0.0
 
+    def to_dict(self) -> dict:
+        return {
+            "episodes": dict(self.episodes),
+            "successes": dict(self.successes),
+            "success_lengths": list(self.success_lengths),
+            "env_steps": self.env_steps,
+            "worker_failures": self.worker_failures,
+            "wall_time_s": self.wall_time_s,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RolloutStats":
+        return cls(
+            episodes=dict(d.get("episodes", {})),
+            successes=dict(d.get("successes", {})),
+            success_lengths=list(d.get("success_lengths", [])),
+            env_steps=int(d.get("env_steps", 0)),
+            worker_failures=int(d.get("worker_failures", 0)),
+            wall_time_s=float(d.get("wall_time_s", 0.0)),
+        )
+
+    def merged(self, other: "RolloutStats") -> "RolloutStats":
+        out = RolloutStats.from_dict(self.to_dict())
+        for t, n in other.episodes.items():
+            out.episodes[t] = out.episodes.get(t, 0) + n
+        for t, n in other.successes.items():
+            out.successes[t] = out.successes.get(t, 0) + n
+        out.success_lengths += other.success_lengths
+        out.env_steps += other.env_steps
+        out.worker_failures += other.worker_failures
+        out.wall_time_s += other.wall_time_s
+        return out
+
     def add(self, task: str, success: bool, length: int) -> None:
         self.episodes[task] = self.episodes.get(task, 0) + 1
         self.successes[task] = self.successes.get(task, 0) + int(success)
@@ -159,14 +192,24 @@ class Collector:
         best_of_n: int = 1,
         buffer: ReplayBuffer | None = None,
         seed: int = 0,
+        on_episode=None,
+        skip: dict[str, int] | None = None,
     ) -> RolloutStats:
-        """Run ``episodes_per_task`` episodes of every task; insert them into ``buffer``."""
+        """Run ``episodes_per_task`` episodes of every task; insert them into ``buffer``.
+
+        ``on_episode(stats)`` is called after every finished episode (e.g. to save partial
+        results, so a time-limited job keeps what it has done). ``skip[task] = k`` leaves
+        out that task's first k episodes; seeds are unchanged, so a resumed run produces
+        exactly the episodes an uninterrupted run would have.
+        """
         t0 = time.time()
         record = buffer is not None
+        skip = skip or {}
         queue = deque(
             (t, seed + i * len(tasks) + j)
             for i in range(episodes_per_task)
             for j, t in enumerate(tasks)
+            if i >= skip.get(t, 0)
         )
         slots = [_EnvSlot() for _ in range(self.env.num_envs)]
         stats = RolloutStats()
@@ -232,6 +275,8 @@ class Collector:
                     if term or trunc:
                         done = True
                         stats.add(slot.task, term, slot.steps)
+                        if on_episode is not None:
+                            on_episode(stats)
                         if buffer is not None:
                             self._insert(buffer, slot.recorder)
                         break
