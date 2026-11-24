@@ -122,7 +122,7 @@ smoke)
     echo "[rl] SMOKE PASSED"
     ;;
 assets)
-    $SIM_PY scripts/rl/prefetch_molmospaces.py "$@"
+    $SIM_PY scripts/rl/prefetch_molmospaces.py --done-file "$RL_RUN_DIR/prefetch_done.txt" "$@"
     ;;
 space_check)
     M="$(base_model_dir)"

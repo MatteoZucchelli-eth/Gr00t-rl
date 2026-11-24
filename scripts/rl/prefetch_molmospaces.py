@@ -10,6 +10,7 @@ keeps parallel env workers from all downloading the same assets at job start.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import signal
 import socket
 import time
@@ -41,6 +42,10 @@ def main() -> None:
         help="hard limit per task in seconds (a scene archive can be several GB)",
     )
     ap.add_argument("--retries", type=int, default=2, help="extra passes over failed tasks")
+    ap.add_argument(
+        "--done-file", default=None,
+        help="record finished tasks here and skip them on later runs (resume after a time limit)",
+    )
     args = ap.parse_args()
 
     # Behind Euler's proxy a download can stall with the connection still open; without a
@@ -54,7 +59,14 @@ def main() -> None:
     get_resource_manager()
     print("[prefetch] base resources installed", flush=True)
     pending = expand_task_specs(args.tasks)
+    done_path = Path(args.done_file) if args.done_file else None
+    if done_path is not None and done_path.exists():
+        done = set(done_path.read_text().split())
+        skipped = [t for t in pending if t in done]
+        pending = [t for t in pending if t not in done]
+        print(f"[prefetch] skipping {len(skipped)} tasks already done ({done_path})", flush=True)
     if not pending:
+        print("[prefetch] done, 0 failures (nothing left)", flush=True)
         return
     from gr00t.rl.envs.molmospaces import MolmoSpacesAdapter
 
@@ -78,6 +90,9 @@ def main() -> None:
                 failed[task] = f"{type(e).__name__}: {e}"
             finally:
                 signal.alarm(0)
+            if done_path is not None and task not in failed:
+                with open(done_path, "a") as f:
+                    f.write(task + "\n")
             dt = time.time() - t_task
             if task in failed or dt > 120:
                 print(f"[prefetch]   {task}: {failed.get(task, 'ok')} ({dt:.0f}s)", flush=True)

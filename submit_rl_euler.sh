@@ -90,6 +90,22 @@ if [ ! -f "$SIF" ]; then
     time tar -xzf "$CONTAINER_TAR" -C "$TMPDIR"
 fi
 
+# --- assets: resume from earlier prefetch logs if no done-file exists yet --------------
+# A task counts as done if its "start" line is followed by another "start" line and no
+# failure was logged for it (the last task of a killed job is redone).
+if [ "$MODE" = "assets" ] && [ ! -s "$RUN_DIR/prefetch_done.txt" ]; then
+    for log in "$PROJECT_DIR"/logs/rl-assets-*.out; do
+        [ -f "$log" ] || continue
+        awk -f "$PROJECT_DIR/scripts/rl/euler/prefetch_done_from_logs.awk" "$log"
+    done | sort -u > "$RUN_DIR/prefetch_done.seed"
+    if [ -s "$RUN_DIR/prefetch_done.seed" ]; then
+        mv "$RUN_DIR/prefetch_done.seed" "$RUN_DIR/prefetch_done.txt"
+        echo "[euler] assets: $(wc -l < "$RUN_DIR/prefetch_done.txt") tasks marked done from earlier logs"
+    else
+        rm -f "$RUN_DIR/prefetch_done.seed"
+    fi
+fi
+
 # --- MolmoSpaces assets: node-local copy when a packed tarball exists ----------------
 MLSPACES_BIND="$MLSPACES_DIR"
 if [ "$MODE" != "assets" ] && [ -f "$MLSPACES_TAR" ]; then
