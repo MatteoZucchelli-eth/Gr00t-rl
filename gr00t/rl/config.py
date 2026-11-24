@@ -38,6 +38,11 @@ class EnvConfig:
     cap_envs_by_gpu_mem: bool = True
     """If workers render on the model's GPU, lower num_envs to what fits in free memory
     (logged) instead of running out of memory mid-run."""
+    mem_fraction: float = 0.85
+    """Workers share this fraction of the job's host-memory limit (cgroup / SLURM), minus
+    the learner. A worker above its share is restarted between episodes, before the
+    kernel OOM-kills it mid-episode (MolmoSpaces workers keep every scene they load).
+    0 disables."""
 
 
 @dataclass

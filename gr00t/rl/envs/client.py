@@ -13,7 +13,15 @@ import subprocess
 import time
 from typing import Any, Sequence
 
+from gr00t.rl.envs.memory import job_memory_limit_gb, process_mem_gb
 from gr00t.rl.envs.protocol import pack, unpack
+
+
+_POLL_SLICE_MS = 1000
+"""Waits for replies are cut into slices this long; between slices, spawned workers are
+checked for having exited, so a killed worker fails its request at once instead of after
+the full step timeout (which stalls every other worker)."""
+_STARTUP_RELAUNCHES = 3
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -80,7 +88,11 @@ class RemoteVectorEnv:
         timeout_s: float = 600.0,
         log_dir: str | None = None,
         startup_timeout_s: float = 900.0,
+        mem_fraction: float = 0.85,
     ):
+        """``mem_fraction``: workers share this fraction of the job's memory limit (minus
+        the learner process); one above its share is recycled at its next episode
+        boundary (``needs_recycle``). 0 disables recycling."""
         import zmq
 
         self._zmq = zmq
@@ -95,6 +107,8 @@ class RemoteVectorEnv:
         self.max_episode_steps = max_episode_steps
         self.timeout_ms = int(timeout_s * 1000)
         self.log_dir = Path(log_dir) if log_dir else None
+        self.mem_fraction = float(mem_fraction)
+        self.job_mem_gb = job_memory_limit_gb()
         self.ctx = zmq.Context()
         self.procs: list[subprocess.Popen | None] = [None] * num_envs
         self.socks: list[Any] = [None] * num_envs
@@ -105,6 +119,7 @@ class RemoteVectorEnv:
         self.spec = None
         deadline = time.time() + startup_timeout_s
         for i in range(num_envs):
+            relaunches = 0
             while True:
                 try:
                     reply = self.call(i, {"cmd": "ping"}, timeout_ms=30_000)
@@ -113,7 +128,15 @@ class RemoteVectorEnv:
                 except EnvWorkerError:
                     if time.time() > deadline:
                         raise
-                    self._check_alive(i)
+                    try:
+                        self._check_alive(i)
+                    except EnvWorkerError:
+                        # A worker that dies while starting (seen: exit -2 on a busy node)
+                        # gets a few fresh attempts before the whole run is given up.
+                        if relaunches >= _STARTUP_RELAUNCHES:
+                            raise
+                        relaunches += 1
+                        self._launch(i)
                     self._reconnect(i)
 
     # ------------------------------------------------------------ process management
@@ -155,6 +178,42 @@ class RemoteVectorEnv:
         proc = self.procs[i]
         if proc is not None and proc.poll() is not None:
             raise EnvWorkerError({i: f"process exited with code {proc.returncode} during startup"})
+
+    def _exit_reason(self, i: int) -> str | None:
+        """Why spawned worker ``i`` is gone, or None while it runs."""
+        proc = self.procs[i]
+        if proc is None or proc.poll() is None:
+            return None
+        code = proc.returncode
+        hint = " (SIGKILL: most likely the host OOM killer)" if code == -9 else ""
+        return f"process exited with code {code}{hint}"
+
+    # ------------------------------------------------------------ memory
+
+    def worker_mem_gb(self, i: int) -> float:
+        proc = self.procs[i]
+        return process_mem_gb(proc.pid) if proc is not None else 0.0
+
+    def worker_mem_share_gb(self) -> float:
+        """Memory one worker may use: its share of the job limit after the learner."""
+        budget = self.mem_fraction * self.job_mem_gb - process_mem_gb()
+        return max(budget, 0.0) / self.num_envs
+
+    def needs_recycle(self, i: int) -> tuple[bool, float, float]:
+        """(worker above its memory share, its memory in GB, the share in GB)."""
+        if not self.spawn or self.mem_fraction <= 0 or self.job_mem_gb == float("inf"):
+            return False, 0.0, 0.0
+        used, share = self.worker_mem_gb(i), self.worker_mem_share_gb()
+        return used > share, used, share
+
+    def memory_summary(self) -> dict[str, float]:
+        workers = [self.worker_mem_gb(i) for i in range(self.num_envs)]
+        return {
+            "learner_gb": process_mem_gb(),
+            "workers_gb": sum(workers),
+            "worker_max_gb": max(workers, default=0.0),
+            "job_limit_gb": self.job_mem_gb,
+        }
 
     def _connect(self, i: int) -> None:
         sock = self.ctx.socket(self._zmq.REQ)
@@ -208,7 +267,16 @@ class RemoteVectorEnv:
                     failed[i] = f"timed out after {timeout_ms} ms"
                     self._reconnect(i)  # a REQ socket without a reply is unusable
                 break
-            events = dict(poller.poll(remaining))
+            events = dict(poller.poll(min(remaining, _POLL_SLICE_MS)))
+            if not events:
+                for i in list(pending):
+                    reason = self._exit_reason(i)
+                    if reason is not None:
+                        failed[i] = reason
+                        pending.discard(i)
+                        poller.unregister(self.socks[i])
+                        self._reconnect(i)
+                continue
             for sock, _ in events.items():
                 i = sock_to_idx[id(sock)]
                 reply = unpack(sock.recv())

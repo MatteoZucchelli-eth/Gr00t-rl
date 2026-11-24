@@ -8,7 +8,7 @@ from gr00t.rl.envs.fake import FakeAdapter
 from gr00t.rl.envs.server import EnvRunner
 from gr00t.rl.ogpo import OGPOLearner
 from gr00t.rl.replay import ReplayBuffer
-from gr00t.rl.rollout import Collector
+from gr00t.rl.rollout import Collector, RolloutStats
 import numpy as np
 import pytest
 from test_support.rl_toy import ToyFlowPolicy
@@ -156,3 +156,61 @@ def test_collector_skip_and_stats_merge(fake_envs):
     assert total.episodes == {"task_win": 3, "task_lose": 3}
     assert total.per_task() == {"task_win": 1.0, "task_lose": 0.0}
     assert total.env_steps == part0.env_steps + part1.env_steps
+
+
+def test_killed_worker_fails_fast(fake_envs):
+    """A worker killed mid-request (e.g. by the OOM killer) fails at once, not after the
+    step timeout, and the other workers' replies in the batch are kept."""
+    import time
+
+    fake_envs.reset({0: ("a", 1), 1: ("b", 2)})
+    fake_envs.procs[0].kill()
+    fake_envs.procs[0].wait()
+    t0 = time.time()
+    with pytest.raises(EnvWorkerError) as e:
+        fake_envs.step_chunk({i: [{"gripper_position": np.zeros(1)}] for i in range(2)})
+    assert time.time() - t0 < 10  # timeout_s is 60
+    assert "SIGKILL" in e.value.failed[0] and 1 in e.value.replies
+    fake_envs.restart(0)
+    assert fake_envs.call(0, {"cmd": "ping"})["ok"]
+
+
+def test_collector_recycles_workers_over_memory_share(tmp_path):
+    env = RemoteVectorEnv(
+        2,
+        "fake",
+        base_port=18400 + (abs(hash(str(tmp_path))) % 500) * 2,
+        spawn=True,
+        python=sys.executable,
+        backend_kwargs={"close_steps": 2, "image_size": [8, 12], "leak_mb_per_reset": 64},
+        max_episode_steps=12,
+        timeout_s=60,
+        log_dir=str(tmp_path / "logs"),
+    )
+    try:
+        # Pretend the job may use just enough for the learner plus ~150 MB per worker:
+        # each worker is recycled after its 2nd-3rd reset instead of growing without bound.
+        from gr00t.rl.envs.memory import process_mem_gb
+
+        env.job_mem_gb = (process_mem_gb() + 2 * 0.15) / env.mem_fraction
+        pids = {p.pid for p in env.procs}
+        policy = GripperPolicy(prefix_dim=4, horizon=4, action_dim=2)
+        col = Collector(env, policy, None, execute_steps=3)
+        stats = col.run(["task_win"], episodes_per_task=10, mode="ode", seed=0)
+        assert stats.episodes == {"task_win": 10} and stats.worker_failures == 0
+        assert stats.worker_recycles >= 2
+        assert pids.isdisjoint(p.pid for p in env.procs)
+        assert max(env.worker_mem_gb(i) for i in range(2)) < 0.5
+        assert RolloutStats.from_dict(stats.to_dict()).worker_recycles == stats.worker_recycles
+    finally:
+        env.close()
+
+
+def test_job_memory_limit_reads_slurm(monkeypatch):
+    from gr00t.rl.envs import memory
+
+    monkeypatch.setattr(memory, "_cgroup_limit_bytes", lambda: None)
+    monkeypatch.delenv("SLURM_MEM_PER_NODE", raising=False)
+    monkeypatch.setenv("SLURM_MEM_PER_CPU", "8192")
+    monkeypatch.setenv("SLURM_CPUS_PER_TASK", "2")
+    assert memory.job_memory_limit_gb() == pytest.approx(16.0)

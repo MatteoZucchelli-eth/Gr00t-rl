@@ -42,6 +42,7 @@ class RolloutStats:
     success_lengths: list[int] = field(default_factory=list)
     env_steps: int = 0
     worker_failures: int = 0
+    worker_recycles: int = 0
     wall_time_s: float = 0.0
 
     def to_dict(self) -> dict:
@@ -51,6 +52,7 @@ class RolloutStats:
             "success_lengths": list(self.success_lengths),
             "env_steps": self.env_steps,
             "worker_failures": self.worker_failures,
+            "worker_recycles": self.worker_recycles,
             "wall_time_s": self.wall_time_s,
         }
 
@@ -62,6 +64,7 @@ class RolloutStats:
             success_lengths=list(d.get("success_lengths", [])),
             env_steps=int(d.get("env_steps", 0)),
             worker_failures=int(d.get("worker_failures", 0)),
+            worker_recycles=int(d.get("worker_recycles", 0)),
             wall_time_s=float(d.get("wall_time_s", 0.0)),
         )
 
@@ -74,6 +77,7 @@ class RolloutStats:
         out.success_lengths += other.success_lengths
         out.env_steps += other.env_steps
         out.worker_failures += other.worker_failures
+        out.worker_recycles += other.worker_recycles
         out.wall_time_s += other.wall_time_s
         return out
 
@@ -97,6 +101,7 @@ class RolloutStats:
             f"{prefix}/episodes": float(sum(self.episodes.values())),
             f"{prefix}/env_steps": float(self.env_steps),
             f"{prefix}/worker_failures": float(self.worker_failures),
+            f"{prefix}/worker_recycles": float(self.worker_recycles),
             f"{prefix}/wall_time_s": self.wall_time_s,
         }
         if self.success_lengths:
@@ -124,8 +129,41 @@ class Collector:
         self.critic_horizon = critic_horizon
         self.gamma = gamma
         self.max_history = max(0, -min(policy.video_delta_indices + [0]))
+        self.mem_log_every_s = 600.0
+        self._last_mem_log = time.time()
 
     # ------------------------------------------------------------------ helpers
+
+    def _maybe_recycle(self, i: int, stats: "RolloutStats") -> None:
+        """Restart worker ``i`` between episodes if it outgrew its memory share.
+
+        MolmoSpaces workers keep each loaded scene's memory; without this, the job hits
+        its memory limit and the kernel kills workers mid-episode.
+        """
+        check = getattr(self.env, "needs_recycle", None)
+        if check is None:
+            return
+        over, used, share = check(i)
+        if over:
+            logger.info(
+                "Recycling worker %d between episodes: %.1f GB > %.1f GB share", i, used, share
+            )
+            stats.worker_recycles += 1
+            self.env.restart(i)
+
+    def _log_memory(self) -> None:
+        self._last_mem_log = time.time()
+        summary = getattr(self.env, "memory_summary", None)
+        if summary is None:
+            return
+        m = summary()
+        logger.info(
+            "memory: learner %.1f GB, workers %.1f GB (max %.1f GB), job limit %.0f GB",
+            m["learner_gb"],
+            m["workers_gb"],
+            m["worker_max_gb"],
+            m["job_limit_gb"],
+        )
 
     def _stack_video(self, history: deque) -> dict[str, np.ndarray]:
         n = len(history)
@@ -282,6 +320,9 @@ class Collector:
                         break
                 if done:
                     finished.append(i)
+                    self._maybe_recycle(i, stats)
+            if time.time() - self._last_mem_log >= self.mem_log_every_s:
+                self._log_memory()
             if finished:
                 assign(finished)
         stats.wall_time_s = time.time() - t0

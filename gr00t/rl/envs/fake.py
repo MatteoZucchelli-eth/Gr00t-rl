@@ -19,6 +19,7 @@ class FakeAdapter:
         gripper_action_key: str = "gripper_position",
         close_steps: int = 3,
         success_prob: float = 0.0,
+        leak_mb_per_reset: int = 0,
     ):
         self.camera_keys = list(camera_keys)
         self.image_size = tuple(image_size)
@@ -26,6 +27,8 @@ class FakeAdapter:
         self.gripper_action_key = gripper_action_key
         self.close_steps = close_steps
         self.success_prob = success_prob
+        self.leak_mb_per_reset = leak_mb_per_reset
+        self._leaked: list[bytearray] = []  # mimics MolmoSpaces keeping every scene
         self._rng = np.random.default_rng(0)
         self._task = ""
         self._closed_for = 0
@@ -55,6 +58,8 @@ class FakeAdapter:
         if seed is not None:
             self._rng = np.random.default_rng(seed)
         self._task = f"fake task {task_id}"
+        if self.leak_mb_per_reset:
+            self._leaked.append(bytearray(b"x" * (self.leak_mb_per_reset << 20)))
         self._closed_for = 0
         self._t = 0
         return self._obs(), {"success": False}

@@ -83,6 +83,7 @@ def main(cfg: EvalConfig) -> dict:
         backend_kwargs=json.loads(e.backend_kwargs_json),
         max_episode_steps=e.max_episode_steps,
         timeout_s=e.step_timeout_s,
+        mem_fraction=e.mem_fraction,
         log_dir=str(out / "env_logs"),
     )
     try:
