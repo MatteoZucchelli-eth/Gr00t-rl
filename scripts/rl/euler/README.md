@@ -80,6 +80,22 @@ run to project `groot-rl-smoke` (a quick check that compute nodes reach wandb). 
 `--wandb-project` / `--wandb-entity` in a preset's `ARGS`. Reusing a `RUN_NAME` for a fresh
 run (after deleting its run dir) appends to the old wandb run: pick a new name instead.
 
+## MolmoSpaces assets: shared store vs. node-local copy
+
+Assets live in `/cluster/work/mrl/$USER/mlspaces` (~130k small files on Lustre). Loading a
+scene reads thousands of them, which is slow on a shared parallel filesystem, so jobs use
+a packed copy when it exists:
+
+```bash
+scripts/rl/euler/submit.sh rl_experiments/assets.sh   # download scenes for the task lists
+sbatch scripts/rl/euler/pack_assets.sh                # pack -> containers/mlspaces.tar (CPU job)
+```
+
+Every job (except `assets`) then extracts `mlspaces.tar` to node-local `$TMPDIR` at start
+(one sequential read; ~13 s for 13 GB locally) and binds that copy at `/mlspaces`. Re-run
+both steps when new tasks need scenes that are not packed yet; without a tarball, jobs
+read the shared store directly.
+
 ## Where things go
 
 | What | Path on Euler |

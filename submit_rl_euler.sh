@@ -30,7 +30,8 @@
 #   caches     /cluster/scratch/$USER/groot/cache                    (HF weights, triton)
 #   run dirs   /cluster/scratch/$USER/groot/rl_runs/$RUN_NAME        (buffer, checkpoints)
 #   results    /cluster/project/mrl/$USER/results/groot-rl/$RUN_NAME (final policy, metrics)
-#   assets     /cluster/work/mrl/$USER/mlspaces/{assets,cache}       (MolmoSpaces)
+#   assets     /cluster/work/mrl/$USER/mlspaces/{assets,cache}       (MolmoSpaces; packed copy
+#              /cluster/work/mrl/$USER/containers/mlspaces.tar is extracted to $TMPDIR)
 # The existing finetuning runs (submit_euler.sh) live in /cluster/scratch/$USER/groot/runs
 # and appear in the container as /groot/runs/<run>: use that as --model-path.
 # =============================================================================
@@ -61,6 +62,10 @@ RUN_DIR="$GROOT_DIR/rl_runs/$RUN_NAME"
 RESULTS_ROOT="${RESULTS_ROOT:-/cluster/project/mrl/$USER/results/groot-rl}"
 RESULTS_DIR="$RESULTS_ROOT/$RUN_NAME"
 MLSPACES_DIR="${MLSPACES_DIR:-/cluster/work/mrl/$USER/mlspaces}"
+# Packed copy of MLSPACES_DIR (scripts/rl/euler/pack_assets.sh). If present, jobs extract it
+# to node-local $TMPDIR: one sequential read instead of thousands of small-file reads on
+# Lustre per episode reset. The assets mode itself writes, so it always uses MLSPACES_DIR.
+MLSPACES_TAR="${MLSPACES_TAR:-/cluster/work/mrl/$USER/containers/mlspaces.tar}"
 
 echo "=== GR00T RL job ==="
 echo "Job ID:     ${SLURM_JOB_ID:-local}   Host: $(hostname)   Date: $(date)"
@@ -85,6 +90,20 @@ if [ ! -f "$SIF" ]; then
     time tar -xzf "$CONTAINER_TAR" -C "$TMPDIR"
 fi
 
+# --- MolmoSpaces assets: node-local copy when a packed tarball exists ----------------
+MLSPACES_BIND="$MLSPACES_DIR"
+if [ "$MODE" != "assets" ] && [ -f "$MLSPACES_TAR" ]; then
+    if [ ! -d "$TMPDIR/mlspaces/assets" ]; then
+        echo "[euler] Extracting MolmoSpaces assets to \$TMPDIR..."
+        mkdir -p "$TMPDIR/mlspaces"
+        time tar -xf "$MLSPACES_TAR" -C "$TMPDIR/mlspaces"
+    fi
+    MLSPACES_BIND="$TMPDIR/mlspaces"
+    echo "[euler] MolmoSpaces assets: node-local copy of $MLSPACES_TAR (missing assets would be downloaded into the local copy and lost at job end; re-run the assets preset + pack_assets.sh for new tasks)"
+else
+    echo "[euler] MolmoSpaces assets: $MLSPACES_DIR (shared, Lustre)"
+fi
+
 # --- Launch --------------------------------------------------------------------------
 # Code directories are bound over the copy baked into the image, so a code rsync is
 # enough to change what runs; rebuild the container only when dependencies change.
@@ -94,7 +113,7 @@ BINDS=(
     --bind "$GROOT_DIR:/groot"
     --bind "$RUN_DIR:/rl_run"
     --bind "$RESULTS_DIR:/results"
-    --bind "$MLSPACES_DIR:/mlspaces"
+    --bind "$MLSPACES_BIND:/mlspaces"
     --bind "$PROJECT_DIR/.env:/workspace/.env"
     --bind "$PROJECT_DIR/gr00t:/workspace/gr00t"
     --bind "$PROJECT_DIR/scripts:/workspace/scripts"

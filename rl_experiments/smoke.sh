@@ -6,6 +6,6 @@
 #   scripts/rl/euler/submit.sh rl_experiments/smoke.sh --gpus=a100_80gb:1   (and drop EXTRA_ENV)
 MODE=smoke
 RUN_NAME=smoke
-SBATCH_ARGS="--time=01:30:00 --cpus-per-task=8 --gpus=rtx_4090:1 --tmp=100G"
+SBATCH_ARGS="--time=01:30:00 --cpus-per-task=8 --gpus=rtx_4090:1 --tmp=150G"
 EXTRA_ENV="--env SMOKE_TRAINABLE_REGEX=action_decoder"
 ARGS=()
