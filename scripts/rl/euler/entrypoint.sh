@@ -18,6 +18,11 @@
 # =============================================================================
 set -euo pipefail
 
+# The whole body lives in main(), which bash parses completely before running it. Bash
+# otherwise reads a script lazily from disk, and on Euler's NFS home a sync that replaces
+# this file mid-job leaves the running bash with a stale handle ("error reading input
+# file: Stale file handle"), killing the job after its current step.
+main() {
 MODE="${1:?usage: entrypoint.sh <smoke|assets|space_check|list_tasks|eval|train> [args...]}"
 shift
 
@@ -55,7 +60,7 @@ fi
 export TEST_CACHE_PATH="${TEST_CACHE_PATH:-${XDG_CACHE_HOME:-$HOME/.cache}/g00t_tests}"
 # multiprocessing (DataLoader workers) puts Unix sockets under $TMPDIR; Linux caps socket
 # paths at 107 bytes, so fall back to /tmp when the inherited host path is long.
-if [ "${#TMPDIR}" -gt 60 ]; then export TMPDIR=/tmp; fi
+_tmp="${TMPDIR:-}"; if [ "${#_tmp}" -gt 60 ]; then export TMPDIR=/tmp; fi
 RL_RUN_DIR="${RL_RUN_DIR:-/tmp/rl_run}"
 RL_RESULTS_DIR="${RL_RESULTS_DIR:-}"
 mkdir -p "$RL_RUN_DIR"
@@ -152,3 +157,7 @@ train)
     exit 2
     ;;
 esac
+}
+
+main "$@"
+exit $?
