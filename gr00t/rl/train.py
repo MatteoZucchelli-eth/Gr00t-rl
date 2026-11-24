@@ -41,7 +41,7 @@ from gr00t.rl.envs.client import RemoteVectorEnv
 from gr00t.rl.flow_policy import FlowPolicy, prepare_inputs
 from gr00t.rl.ogpo import CriticBatch, OGPOLearner
 from gr00t.rl.replay import ReplayBuffer
-from gr00t.rl.rollout import Collector, RolloutStats, fill_missing_prefixes
+from gr00t.rl.rollout import Collector, RolloutStats, cap_num_envs, fill_missing_prefixes
 
 
 logger = logging.getLogger("gr00t.rl.train")
@@ -252,8 +252,13 @@ class Trainer:
     def _ensure_env(self) -> Collector:
         if self.collector is None:
             e = self.cfg.env
+            num_envs = (
+                cap_num_envs(e.num_envs, e.gpu_mem_per_env_gb, self.device, e.render_devices)
+                if e.cap_envs_by_gpu_mem
+                else e.num_envs
+            )
             self.env = RemoteVectorEnv(
-                e.num_envs,
+                num_envs,
                 e.backend,
                 host=e.host,
                 base_port=e.base_port,

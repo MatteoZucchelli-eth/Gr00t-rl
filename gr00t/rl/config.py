@@ -33,6 +33,11 @@ class EnvConfig:
     max_episode_steps: int = 450
     """Time limit in env steps (truncation, not termination)."""
     step_timeout_s: float = 600.0
+    gpu_mem_per_env_gb: float = 1.1
+    """GPU memory one MuJoCo/EGL rendering worker uses (measured ~1 GB on MolmoSpaces)."""
+    cap_envs_by_gpu_mem: bool = True
+    """If workers render on the model's GPU, lower num_envs to what fits in free memory
+    (logged) instead of running out of memory mid-run."""
 
 
 @dataclass

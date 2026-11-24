@@ -28,7 +28,7 @@ import tyro
 from gr00t.rl.config import EnvConfig, expand_task_specs
 from gr00t.rl.envs.client import RemoteVectorEnv
 from gr00t.rl.flow_policy import FlowPolicy
-from gr00t.rl.rollout import Collector, RolloutStats
+from gr00t.rl.rollout import Collector, RolloutStats, cap_num_envs
 
 
 @dataclass
@@ -67,8 +67,13 @@ def main(cfg: EvalConfig) -> dict:
         cfg.model_path, cfg.embodiment_tag, device=cfg.device, sigma=cfg.sigma
     )
     e = cfg.env
+    num_envs = (
+        cap_num_envs(e.num_envs, e.gpu_mem_per_env_gb, cfg.device, e.render_devices)
+        if e.cap_envs_by_gpu_mem
+        else e.num_envs
+    )
     env = RemoteVectorEnv(
-        e.num_envs,
+        num_envs,
         e.backend,
         host=e.host,
         base_port=e.base_port,

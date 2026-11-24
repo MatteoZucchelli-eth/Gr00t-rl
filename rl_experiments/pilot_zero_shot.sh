@@ -5,13 +5,15 @@
 # Gate for A+RL: mean success >= 5% and successes on >= half the training tasks.
 # 4 h jobs start much sooner than 24 h ones; the evaluator saves eval_partial.json as it
 # goes and the next job in the chain resumes from it (same seeds, identical results).
-# Inference only: any Ampere+ GPU with >= 16 GB works (NOT Turing, e.g. Quadro RTX 6000:
-# the VLM needs FlashAttention-2 / bf16).
+# GPU: N1.7 plus ~1.1 GB per MuJoCo rendering worker. RTX Pro 6000 (96 GB, 80 on Euler)
+# fits 20 workers: ~8.6 episodes/min, ~2.5 h per family. A 24 GB RTX 4090 fits ~9 (the
+# worker count is capped automatically). Turing GPUs (Quadro RTX 6000, 2080 Ti) cannot run
+# the VLM (FlashAttention-2 / bf16).
 FAMILY="${FAMILY:?set FAMILY=pick|pnp|open|close (see splits/pilot_candidates.txt)}"
 MODE=eval
 RUN_NAME=pilot_zero_shot_$FAMILY
-CHAIN=4
-SBATCH_ARGS="--time=04:00:00 --gpus=rtx_4090:1 --cpus-per-task=24 --mem-per-cpu=8G --tmp=100G"
+CHAIN=2
+SBATCH_ARGS="--time=04:00:00 --gpus=rtx_pro_6000:1 --cpus-per-task=24 --mem-per-cpu=8G --tmp=100G"
 ARGS=(
     --model-path nvidia/GR00T-N1.7-3B
     --tasks "$(grep -E "^$FAMILY/" rl_experiments/splits/pilot_candidates.txt)"

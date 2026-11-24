@@ -329,3 +329,44 @@ def fill_missing_prefixes(
         feats = policy.encode_prepared(collated)
         buffer.set_prefixes(idx, feats.prefix.float().cpu().numpy())
     return len(missing)
+
+
+def cap_num_envs(
+    requested: int,
+    per_env_gb: float,
+    model_device,
+    render_devices,
+    headroom_gb: float = 6.0,
+) -> int:
+    """Largest number of rendering workers that fits next to the model on its GPU.
+
+    Each MuJoCo EGL worker allocates ~1 GB on its render GPU; with workers on the model's
+    GPU, too many of them run the card out of memory mid-run (seen on 24 GB RTX 4090s with
+    20 workers). Call after the model is loaded; ``headroom_gb`` covers the model process
+    growing during inference (measured: ~7.5 GB after loading N1.7, 13.4 GB while running).
+    """
+    dev = torch.device(model_device)
+    if dev.type != "cuda" or not torch.cuda.is_available():
+        return requested
+    gpu = dev.index if dev.index is not None else torch.cuda.current_device()
+    on_model_gpu = sum(
+        1 for i in range(requested) if render_devices[i % len(render_devices)] == gpu
+    )
+    if on_model_gpu == 0:
+        return requested
+    free_gb = torch.cuda.mem_get_info(gpu)[0] / 2**30
+    fit = int(max(0.0, free_gb - headroom_gb) // per_env_gb)
+    if on_model_gpu <= fit:
+        return requested
+    capped = max(1, requested - (on_model_gpu - fit))
+    logger.warning(
+        "num_envs %d -> %d: %.1f GB free on GPU %d after loading the model, ~%.1f GB per "
+        "rendering worker + %.0f GB headroom",
+        requested,
+        capped,
+        free_gb,
+        gpu,
+        per_env_gb,
+        headroom_gb,
+    )
+    return capped
